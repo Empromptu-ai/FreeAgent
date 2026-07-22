@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "free-agent/free_agent",
+  "provider": {
+    "free-agent": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (via free_agent)",
+      "options": {
+        "baseURL": "http://localhost:49786/v1",
+        "headers": { "x-session-id": "opencode" }
+      },
+      "models": {
+        "free_agent": {
+          "name": "FreeAgent"
+        }
+      }
+    }
+  }
+}
