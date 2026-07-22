@@ -1,16 +1,17 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "model": "free-agent/free_agent",
   "provider": {
-    "context-architect": {
+    "free-agent": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "Ollama (via context_architect)",
+      "name": "Ollama (via free_agent)",
       "options": {
         "baseURL": "http://localhost:49786/v1",
         "headers": { "x-session-id": "opencode" }
       },
       "models": {
-        "context_architect": {
-          "name": "Context Architect"
+        "free_agent": {
+          "name": "FreeAgent"
         }
       }
     }

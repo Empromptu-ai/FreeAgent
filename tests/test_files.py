@@ -1,7 +1,7 @@
-from context_architect.config import Config
-from context_architect.files import FileLedger, detect_touches
-from context_architect.llm.fake import FakeBackend
-from context_architect.models import Message, Role, ToolUseBlock
+from free_agent.config import Config
+from free_agent.files import FileLedger, detect_touches
+from free_agent.llm.fake import FakeBackend
+from free_agent.models import Message, Role, ToolUseBlock
 
 
 def _tool_msg(name, inp):
@@ -75,7 +75,7 @@ def test_description_refined_not_overwritten():
 
     # Seed an existing description.
     ledger.entries  # noqa
-    from context_architect.files import FileEntry
+    from free_agent.files import FileEntry
 
     ledger.entries["src/a.py"] = FileEntry(path="src/a.py", description="original desc")
 
@@ -89,7 +89,7 @@ def test_description_refined_not_overwritten():
 
 
 def test_ledger_message_render_and_roundtrip():
-    from context_architect.files import FileEntry
+    from free_agent.files import FileEntry
 
     ledger = FileLedger()
     ledger.entries["x.py"] = FileEntry(path="x.py", description="thing", reads=2, writes=1)

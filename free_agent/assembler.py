@@ -2,7 +2,7 @@
 
 Fixed order:  pinned setup  ->  body  ->  file ledger.
 
-The ``body`` is produced by :func:`context_architect.window.apply_window` and is
+The ``body`` is produced by :func:`free_agent.window.apply_window` and is
 already ordered chronologically — older turns as summaries, the most recent
 ``num_full_text_turns`` turns as their full text. Everything not in these buckets
 is dropped from the model's view (it remains recoverable from the on-disk

@@ -1,4 +1,4 @@
-"""context_architect — rework a coding agent's context at every turn boundary.
+"""free_agent — rework a coding agent's context at every turn boundary.
 
 Compact summaries stay in the model's view; full detail is archived to disk and
 recoverable on demand via the ``recall_turn`` tool.
@@ -21,13 +21,13 @@ from .models import (
 )
 from .recall import TOOL_NAME as RECALL_TOOL_NAME
 from .recall import recall_tool_schema
-from .session import ContextArchitect, Session
+from .session import FreeAgent, Session
 from .store import FilesystemStore, StorageBackend
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "ContextArchitect",
+    "FreeAgent",
     "Session",
     "Config",
     "LLMConfig",

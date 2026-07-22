@@ -28,7 +28,7 @@ class LLMConfig:
     timeout: float = 120.0
     # Reasoning/thinking effort for reasoning-capable models. None leaves the
     # model's own default; otherwise "off" / "low" / "medium" / "high" (see
-    # context_architect.llm.reasoning). Translated per-provider at call time.
+    # free_agent.llm.reasoning). Translated per-provider at call time.
     reasoning: Optional[str] = None
 
 
@@ -36,7 +36,7 @@ class LLMConfig:
 class Config:
     """Top-level library configuration."""
 
-    storage_root: str = "~/.context_architect"
+    storage_root: str = "~/.free_agent"
     llm: LLMConfig = field(default_factory=LLMConfig)
 
     # Summary shaping.

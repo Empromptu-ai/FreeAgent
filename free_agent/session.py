@@ -1,4 +1,4 @@
-"""The public entry points: ``ContextArchitect`` and ``Session``.
+"""The public entry points: ``FreeAgent`` and ``Session``.
 
 A ``Session`` owns the per-turn pipeline and all persisted state for a single
 session id. One turn boundary is one call to :meth:`Session.rework`.
@@ -159,7 +159,7 @@ class Session:
         return Session(new_session_id, self.config, self.backend, self.store)
 
 
-class ContextArchitect:
+class FreeAgent:
     def __init__(self, config: Optional[Config] = None, store: Optional[StorageBackend] = None):
         self.config = config or Config()
         self.backend = build_backend(self.config.llm)

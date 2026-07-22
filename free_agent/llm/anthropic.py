@@ -1,4 +1,4 @@
-"""Anthropic backend (optional extra: ``pip install context_architect[anthropic]``)."""
+"""Anthropic backend (optional extra: ``pip install free_agent[anthropic]``)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class AnthropicBackend:
             import anthropic  # noqa: F401
         except ImportError as e:  # pragma: no cover - depends on extra
             raise LLMError(
-                "the anthropic package is required: pip install context_architect[anthropic]"
+                "the anthropic package is required: pip install free_agent[anthropic]"
             ) from e
         import anthropic
 

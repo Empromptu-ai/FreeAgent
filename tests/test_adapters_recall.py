@@ -1,7 +1,7 @@
-from context_architect import recall_tool_schema
-from context_architect.adapters import anthropic as a_adapt
-from context_architect.adapters import openai as o_adapt
-from context_architect.models import Role, TextBlock, ToolResultBlock, ToolUseBlock
+from free_agent import recall_tool_schema
+from free_agent.adapters import anthropic as a_adapt
+from free_agent.adapters import openai as o_adapt
+from free_agent.models import Role, TextBlock, ToolResultBlock, ToolUseBlock
 
 
 def test_anthropic_roundtrip():

@@ -5,10 +5,10 @@ import urllib.request
 
 import pytest
 
-from context_architect.config import LLMConfig
-from context_architect.llm import build_backend
-from context_architect.llm.ollama import OllamaBackend
-from context_architect.llm.reasoning import normalize, params_for
+from free_agent.config import LLMConfig
+from free_agent.llm import build_backend
+from free_agent.llm.ollama import OllamaBackend
+from free_agent.llm.reasoning import normalize, params_for
 
 
 # --- normalize --------------------------------------------------------------

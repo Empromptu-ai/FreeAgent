@@ -3,13 +3,13 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "context_architect"
+name = "free_agent"
 version = "0.1.0"
 description = "Rework a coding agent's context at every turn boundary: compact summaries in view, full detail recoverable from disk."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "context_architect" }]
+authors = [{ name = "free_agent" }]
 dependencies = []
 
 [project.optional-dependencies]
@@ -18,7 +18,7 @@ openai = ["openai>=1.40"]
 dev = ["pytest>=7.0"]
 
 [tool.setuptools.packages.find]
-include = ["context_architect*"]
+include = ["free_agent*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

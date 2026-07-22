@@ -1,7 +1,7 @@
 """Split an incoming live context into the four canonical buckets.
 
 The library re-identifies its own previously-injected messages by their
-``metadata[ca_kind]`` marker. Whatever is left over after removing pinned
+``metadata[fa_kind]`` marker. Whatever is left over after removing pinned
 setup, prior summaries, and the file ledger is, by definition, the new
 activity produced this turn.
 """
@@ -13,7 +13,7 @@ from typing import List
 
 from .config import Config
 from .models import (
-    CA_KIND,
+    FA_KIND,
     KIND_FILE_LEDGER,
     KIND_FULL_TURN,
     KIND_PINNED,
@@ -39,7 +39,7 @@ def classify(messages: List[Message], config: Config) -> Buckets:
     #    anything explicitly tagged pinned anywhere.
     n_leading = 0
     for i, m in enumerate(messages):
-        if m.role == Role.SYSTEM and m.ca_kind in (None, KIND_PINNED):
+        if m.role == Role.SYSTEM and m.fa_kind in (None, KIND_PINNED):
             if i == n_leading and n_leading < config.max_pinned_system_messages:
                 n_leading += 1
             else:
@@ -49,17 +49,17 @@ def classify(messages: List[Message], config: Config) -> Buckets:
 
     pinned_idx = set(range(n_leading))
     for i, m in enumerate(messages):
-        if m.ca_kind == KIND_PINNED:
+        if m.fa_kind == KIND_PINNED:
             pinned_idx.add(i)
 
     for i, m in enumerate(messages):
         if i in pinned_idx:
             b.pinned.append(m)
-        elif m.ca_kind == KIND_SUMMARY:
+        elif m.fa_kind == KIND_SUMMARY:
             b.prior_summaries.append(m)
-        elif m.ca_kind == KIND_FULL_TURN:
+        elif m.fa_kind == KIND_FULL_TURN:
             b.prior_full_turns.append(m)
-        elif m.ca_kind == KIND_FILE_LEDGER:
+        elif m.fa_kind == KIND_FILE_LEDGER:
             b.file_ledger.append(m)
         else:
             b.new_activity.append(m)

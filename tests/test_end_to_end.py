@@ -1,4 +1,4 @@
-from context_architect.models import (
+from free_agent.models import (
     KIND_FILE_LEDGER,
     KIND_SUMMARY,
     Message,
@@ -6,7 +6,7 @@ from context_architect.models import (
     TextBlock,
     ToolUseBlock,
 )
-from helpers import make_architect
+from helpers import make_agent
 
 
 def _turn_activity(text, tool=None):
@@ -20,8 +20,8 @@ def _turn_activity(text, tool=None):
 def test_three_turn_compaction(tmp_path):
     # num_full_text_turns=0: every completed turn is summarized immediately
     # (the original, pre-recency-window behavior).
-    ca = make_architect(tmp_path, num_full_text_turns=0)
-    s = ca.session("sess-1")
+    fa = make_agent(tmp_path, num_full_text_turns=0)
+    s = fa.session("sess-1")
 
     pinned = Message(role=Role.SYSTEM, blocks=[TextBlock(text="you are an agent")])
 
@@ -38,7 +38,7 @@ def test_three_turn_compaction(tmp_path):
     h3 = s.rework(ctx)
 
     # (a) Compact: exactly pinned + 3 summaries + 1 ledger = 5 messages.
-    kinds = [m.ca_kind for m in h3]
+    kinds = [m.fa_kind for m in h3]
     assert kinds.count(KIND_SUMMARY) == 3
     assert kinds.count(KIND_FILE_LEDGER) == 1
     assert h3[0].role == Role.SYSTEM
@@ -52,12 +52,12 @@ def test_three_turn_compaction(tmp_path):
         assert "full detail" in recalled
 
     # (c) Ledger accumulated both files across turns.
-    ledger_msg = [m for m in h3 if m.ca_kind == KIND_FILE_LEDGER][0]
+    ledger_msg = [m for m in h3 if m.fa_kind == KIND_FILE_LEDGER][0]
     assert "a.py" in ledger_msg.text()
     assert "b.py" in ledger_msg.text()
 
     # (d) Audit log has one rework record per turn plus recall records.
-    audit = ca.store.read_audit("sess-1")
+    audit = fa.store.read_audit("sess-1")
     reworks = [r for r in audit if r["event"] == "rework"]
     recalls = [r for r in audit if r["event"] == "recall"]
     assert len(reworks) == 3
@@ -66,22 +66,22 @@ def test_three_turn_compaction(tmp_path):
 
 
 def test_resume_reconstructs_state(tmp_path):
-    ca = make_architect(tmp_path)
-    s = ca.session("sess-resume")
+    fa = make_agent(tmp_path)
+    s = fa.session("sess-resume")
     pinned = Message(role=Role.SYSTEM, blocks=[TextBlock(text="setup")])
     s.rework([pinned, _turn_activity("did x", ("edit", {"path": "z.py"}))])
 
-    # New architect / session object over the same storage root.
-    ca2 = make_architect(tmp_path / "..") if False else ca
-    s2 = ca2.session("sess-resume")
+    # New agent / session object over the same storage root.
+    fa2 = make_agent(tmp_path / "..") if False else fa
+    s2 = fa2.session("sess-resume")
     assert s2.turn_index == 1
     assert "z.py" in s2.ledger.entries
     assert len(s2.live_history) >= 2
 
 
 def test_fork(tmp_path):
-    ca = make_architect(tmp_path)
-    s = ca.session("orig")
+    fa = make_agent(tmp_path)
+    s = fa.session("orig")
     pinned = Message(role=Role.SYSTEM, blocks=[TextBlock(text="setup")])
     s.rework([pinned, _turn_activity("did x", ("edit", {"path": "z.py"}))])
 
@@ -93,7 +93,7 @@ def test_fork(tmp_path):
 
 
 def test_recall_missing_key(tmp_path):
-    ca = make_architect(tmp_path)
-    s = ca.session("s")
+    fa = make_agent(tmp_path)
+    s = fa.session("s")
     out = s.recall("turn-9999")
     assert "No archived turn" in out

@@ -4,7 +4,7 @@ The library keeps the last ``num_full_text_turns`` completed turns in the live
 context as their full text (text blocks only); every older turn falls back to
 its one-line summary. A turn that ages out of the window is *demoted* — its
 summary was already produced when the turn was processed and stashed on the
-turn's head message (``CA_SUMMARY``), so demotion is a metadata swap, not a
+turn's head message (``FA_SUMMARY``), so demotion is a metadata swap, not a
 second summarization call.
 
 The result is a single ordered ``body`` (everything between the pinned setup and
@@ -18,8 +18,8 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .models import (
-    CA_KIND,
-    CA_SUMMARY,
+    FA_KIND,
+    FA_SUMMARY,
     KIND_SUMMARY,
     Message,
     Role,
@@ -35,9 +35,9 @@ def _demote(head: Message, turn: int) -> Message:
     """Rebuild the summary message for a full-text turn from its head metadata."""
     return Message(
         role=Role.ASSISTANT,
-        blocks=[TextBlock(text=str(head.metadata.get(CA_SUMMARY, "")))],
+        blocks=[TextBlock(text=str(head.metadata.get(FA_SUMMARY, "")))],
         metadata={
-            CA_KIND: KIND_SUMMARY,
+            FA_KIND: KIND_SUMMARY,
             "turn": turn,
             "archive_key": head.metadata.get("archive_key", ""),
         },

@@ -1,7 +1,7 @@
-"""OpenAI-compatible proxy that inserts context_architect between a host
+"""OpenAI-compatible proxy that inserts free_agent between a host
 (e.g. OpenCode) and a local Ollama server.
 
-    host ──/v1/chat/completions──▶  ca_proxy  ──▶  Ollama
+    host ──/v1/chat/completions──▶  fa_proxy  ──▶  Ollama
                                        │  rewrites prior turns into summaries
                                        └──▶  /recall serves the archive
 
@@ -17,7 +17,7 @@ question. So the proxy splits each transcript at the last user message:
 
   * the in-flight turn (from the last user message on) is sent VERBATIM;
   * everything before it is completed history, which is folded into
-    context_architect summaries the moment it becomes visible (i.e. on the next
+    free_agent summaries the moment it becomes visible (i.e. on the next
     request). This gives the spec's behavior with a one-turn lag inherent to
     intercepting before the response exists.
 
@@ -28,41 +28,41 @@ Run:
 
     pip install -e ".[openai]"          # or just: pip install -e .
     pip install fastapi uvicorn httpx
-    uvicorn examples.ca_proxy:app --port 49786
+    uvicorn examples.fa_proxy:app --port 49786
 
 Environment:
     OLLAMA_BASE_URL   default http://localhost:11434
-    CA_MODEL          default qwen3.6:35b   (used for summary/label + ledger,
-                      and for the main agent loop unless CA_MAIN_MODEL is set)
-    CA_MAIN_MODEL     default = CA_MODEL. The model the main agent loop runs on;
+    FA_MODEL          default qwen3.6:35b   (used for summary/label + ledger,
+                      and for the main agent loop unless FA_MAIN_MODEL is set)
+    FA_MAIN_MODEL     default = FA_MODEL. The model the main agent loop runs on;
                       the proxy stamps it onto every request so the host's own
                       model id becomes a placeholder. Set this only to run the
                       summarizer on a different model than the agent.
-    CA_REASONING      reasoning/thinking effort for the MAIN AGENT loop:
+    FA_REASONING      reasoning/thinking effort for the MAIN AGENT loop:
                       off | low | medium | high. Unset -> the model's own
                       default (nothing injected).
-    CA_MAIN_REASONING kept-for-compat alias for CA_REASONING (agent loop).
-    CA_SUMM_REASONING reasoning effort for the internal summary/label/ledger
+    FA_MAIN_REASONING kept-for-compat alias for FA_REASONING (agent loop).
+    FA_SUMM_REASONING reasoning effort for the internal summary/label/ledger
                       calls. Defaults to OFF even when the agent uses reasoning:
                       these run blocking before the agent and discard their
                       thinking, so turning it up only adds latency and timeout
                       risk. Set it only if you specifically want it.
-    CA_STORAGE_ROOT   default ~/.context_architect
-    CA_TOOLS_DENY     comma-separated tool names to drop from the host's tool set
+    FA_STORAGE_ROOT   default ~/.free_agent
+    FA_TOOLS_DENY     comma-separated tool names to drop from the host's tool set
                       before it reaches the model. Defaults to "glob"; set it
-                      empty (CA_TOOLS_DENY=) to pass every tool through.
-    CA_TOOLS_ALLOW    comma-separated tool names to keep (allowlist). When set it
-                      wins over CA_TOOLS_DENY. Stricter but riskier: removing a
+                      empty (FA_TOOLS_DENY=) to pass every tool through.
+    FA_TOOLS_ALLOW    comma-separated tool names to keep (allowlist). When set it
+                      wins over FA_TOOLS_DENY. Stricter but riskier: removing a
                       tool the host still references in a prior tool_call can make
-                      some backends error — prefer CA_TOOLS_DENY unless you need a
+                      some backends error — prefer FA_TOOLS_DENY unless you need a
                       hard whitelist.
-    CA_AUDIT_OUTBOUND set to 1 to dump the exact messages sent to the main model
+    FA_AUDIT_OUTBOUND set to 1 to dump the exact messages sent to the main model
                       at the start of each turn to
                       {root}/{session}/turn-NNN-msgs_to_main_llm.json
-    CA_AUDIT_INBOUND  set to 1 to dump the exact messages the main model returned
+    FA_AUDIT_INBOUND  set to 1 to dump the exact messages the main model returned
                       during each turn (all tool-loop responses, in order) to
                       {root}/{session}/turn-NNN-msgs_from_main_llm.json
-    CA_AUDIT_FULL     set to 1 to dump the complete interleaved turn (in-flight
+    FA_AUDIT_FULL     set to 1 to dump the complete interleaved turn (in-flight
                       messages + tool calls + tool results + final answer) to
                       {root}/{session}/turn-NNN-full_transcript.json
 """
@@ -79,51 +79,51 @@ import httpx
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from context_architect import Config, ContextArchitect, LLMConfig
-from context_architect.adapters import openai as oai
-from context_architect.llm.reasoning import normalize as _norm_reasoning
-from context_architect.llm.reasoning import params_for as _reasoning_params
+from free_agent import Config, FreeAgent, LLMConfig
+from free_agent.adapters import openai as oai
+from free_agent.llm.reasoning import normalize as _norm_reasoning
+from free_agent.llm.reasoning import params_for as _reasoning_params
 
 OLLAMA = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-MODEL = os.environ.get("CA_MODEL", "qwen3.6:35b")
-# The model the *main agent loop* runs on. Defaults to CA_MODEL so a single
-# CA_MODEL env var drives everything; set CA_MAIN_MODEL only if you want the
-# summary/label calls (CA_MODEL) to use a different model than the main agent.
+MODEL = os.environ.get("FA_MODEL", "qwen3.6:35b")
+# The model the *main agent loop* runs on. Defaults to FA_MODEL so a single
+# FA_MODEL env var drives everything; set FA_MAIN_MODEL only if you want the
+# summary/label calls (FA_MODEL) to use a different model than the main agent.
 # The proxy stamps this onto every main-agent request, so whatever model id the
 # host (OpenCode) has configured becomes a cosmetic placeholder — change the
 # model here, in one place, and restart the proxy.
-MAIN_MODEL = os.environ.get("CA_MAIN_MODEL", MODEL)
+MAIN_MODEL = os.environ.get("FA_MAIN_MODEL", MODEL)
 
 # Reasoning/thinking effort for the MAIN AGENT loop (the model that answers the
-# user). This is what CA_REASONING controls; CA_MAIN_REASONING is a kept-for-
+# user). This is what FA_REASONING controls; FA_MAIN_REASONING is a kept-for-
 # compat alias. Unset -> nothing injected -> the model's own default.
 AGENT_REASONING = _norm_reasoning(
-    os.environ.get("CA_MAIN_REASONING") or os.environ.get("CA_REASONING")
+    os.environ.get("FA_MAIN_REASONING") or os.environ.get("FA_REASONING")
 )
 # Reasoning effort for the internal summary/label/file-ledger calls. These are
 # mechanical JSON extractions that run *blocking, on the turn's critical path*
 # (before the agent is even called) and whose thinking tokens are discarded — so
 # turning reasoning up here is nearly all cost (latency, and timeouts that would
 # surface as errors) for no benefit. It therefore defaults to OFF even when the
-# agent runs with reasoning on; opt in explicitly with CA_SUMM_REASONING only if
+# agent runs with reasoning on; opt in explicitly with FA_SUMM_REASONING only if
 # you have a specific reason to.
-SUMM_REASONING = _norm_reasoning(os.environ.get("CA_SUMM_REASONING", "off"))
-STORAGE_ROOT = os.environ.get("CA_STORAGE_ROOT", "~/.context_architect")
-AUDIT_OUTBOUND = os.environ.get("CA_AUDIT_OUTBOUND") == "1"
-AUDIT_INBOUND = os.environ.get("CA_AUDIT_INBOUND") == "1"
-AUDIT_FULL = os.environ.get("CA_AUDIT_FULL") == "1"
-NUM_FULL_TEXT_TURNS = int(os.environ.get("CA_NUM_FULL_TEXT_TURNS", "2"))
+SUMM_REASONING = _norm_reasoning(os.environ.get("FA_SUMM_REASONING", "off"))
+STORAGE_ROOT = os.environ.get("FA_STORAGE_ROOT", "~/.free_agent")
+AUDIT_OUTBOUND = os.environ.get("FA_AUDIT_OUTBOUND") == "1"
+AUDIT_INBOUND = os.environ.get("FA_AUDIT_INBOUND") == "1"
+AUDIT_FULL = os.environ.get("FA_AUDIT_FULL") == "1"
+NUM_FULL_TEXT_TURNS = int(os.environ.get("FA_NUM_FULL_TEXT_TURNS", "2"))
 
 # --- System-prompt override -------------------------------------------------
-# Master switch: the override only applies when CA_SYSTEM_OVERRIDE=1, so you can
+# Master switch: the override only applies when FA_SYSTEM_OVERRIDE=1, so you can
 # keep a prompt configured and toggle it on/off without deleting it.
-SYSTEM_OVERRIDE = os.environ.get("CA_SYSTEM_OVERRIDE") == "1"
-# The replacement text. CA_SYSTEM_PROMPT_FILE (a path) takes precedence over the
-# inline CA_SYSTEM_PROMPT. A relative path (e.g. ./system_prompt/foo.md) is
+SYSTEM_OVERRIDE = os.environ.get("FA_SYSTEM_OVERRIDE") == "1"
+# The replacement text. FA_SYSTEM_PROMPT_FILE (a path) takes precedence over the
+# inline FA_SYSTEM_PROMPT. A relative path (e.g. ./system_prompt/foo.md) is
 # resolved against the repo root, not the cwd the proxy was launched from, so
-# in-repo prompt files work no matter where run_ca_proxy.sh is invoked.
+# in-repo prompt files work no matter where run_fa_proxy.sh is invoked.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_sp_file = os.environ.get("CA_SYSTEM_PROMPT_FILE")
+_sp_file = os.environ.get("FA_SYSTEM_PROMPT_FILE")
 
 
 def _resolve_prompt_path(p: str) -> Path:
@@ -134,18 +134,18 @@ def _resolve_prompt_path(p: str) -> Path:
 SYSTEM_PROMPT = (
     _resolve_prompt_path(_sp_file).read_text()
     if _sp_file
-    else os.environ.get("CA_SYSTEM_PROMPT")
+    else os.environ.get("FA_SYSTEM_PROMPT")
 )
 # How the override combines with the host's own system prompt:
 #   replace : swap the whole leading system run for yours (default)
 #   prefix  : your text, then the host's system prompt
 #   suffix  : the host's system prompt, then your text
-SYSTEM_MODE = os.environ.get("CA_SYSTEM_MODE", "replace")
+SYSTEM_MODE = os.environ.get("FA_SYSTEM_MODE", "replace")
 
 
 def _apply_system_override(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rewrite the leading contiguous run of ``system`` messages using the
-    configured override. No-op unless CA_SYSTEM_OVERRIDE=1 and a prompt is set.
+    configured override. No-op unless FA_SYSTEM_OVERRIDE=1 and a prompt is set.
 
     Tool definitions live in ``body["tools"]`` and are never touched here — only
     the system messages inside ``body["messages"]`` are rewritten."""
@@ -167,9 +167,9 @@ def _apply_system_override(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
 # --- Tool filtering ---------------------------------------------------------
 # Drop/keep tools from the host's tool set before it reaches the model. Both
 # vars are comma-separated tool names:
-#   CA_TOOLS_ALLOW : keep ONLY these (allowlist). Wins if both are set.
-#   CA_TOOLS_DENY  : drop these (denylist). Defaults to "glob".
-# An empty CA_TOOLS_DENY (CA_TOOLS_DENY=) disables the default and passes every
+#   FA_TOOLS_ALLOW : keep ONLY these (allowlist). Wins if both are set.
+#   FA_TOOLS_DENY  : drop these (denylist). Defaults to "glob".
+# An empty FA_TOOLS_DENY (FA_TOOLS_DENY=) disables the default and passes every
 # tool through. Allowlist is stricter but riskier: if it removes a tool the host
 # still references in a prior tool_call/tool message, some backends error on the
 # orphaned reference — prefer the denylist unless you need a hard whitelist.
@@ -177,8 +177,8 @@ def _csv_set(name: str, default: str = "") -> set:
     return {t.strip() for t in os.environ.get(name, default).split(",") if t.strip()}
 
 
-TOOLS_ALLOW = _csv_set("CA_TOOLS_ALLOW")
-TOOLS_DENY = _csv_set("CA_TOOLS_DENY", "glob")
+TOOLS_ALLOW = _csv_set("FA_TOOLS_ALLOW")
+TOOLS_DENY = _csv_set("FA_TOOLS_DENY", "glob")
 
 
 def _tool_name(t: Dict[str, Any]) -> Optional[str]:
@@ -207,13 +207,13 @@ CONFIG = Config(
     # summaries (0 = every completed turn is summarized immediately).
     num_full_text_turns=NUM_FULL_TEXT_TURNS,
 )
-ca = ContextArchitect(CONFIG)
+ca = FreeAgent(CONFIG)
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     # ── startup ──
-    print("── context_architect proxy ─────────────────────────────", flush=True)
+    print("── free_agent proxy ─────────────────────────────", flush=True)
     print(f"   ollama    : {OLLAMA}", flush=True)
     print(f"   main model: {MAIN_MODEL}  (agent loop)", flush=True)
     print(f"   summ model: {MODEL}  (summary/label + ledger)", flush=True)
@@ -224,7 +224,7 @@ async def _lifespan(_app: FastAPI):
     )
     print(f"   full-text : last {NUM_FULL_TEXT_TURNS} turns kept verbatim", flush=True)
     if SYSTEM_OVERRIDE and SYSTEM_PROMPT:
-        src = str(_resolve_prompt_path(_sp_file)) if _sp_file else "CA_SYSTEM_PROMPT"
+        src = str(_resolve_prompt_path(_sp_file)) if _sp_file else "FA_SYSTEM_PROMPT"
         print(f"   sys-prompt: OVERRIDE on ({SYSTEM_MODE}) ← {src}", flush=True)
     else:
         print("   sys-prompt: override off (host prompt passes through)", flush=True)
@@ -238,11 +238,11 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(lifespan=_lifespan)
 
 # Per session: how many completed-history messages we've already folded into
-# context_architect. In-memory; a restart re-folds once (harmless).
+# free_agent. In-memory; a restart re-folds once (harmless).
 _folded: Dict[str, int] = {}
 
 # Per session: number of user messages seen. When it grows, a new turn has
-# started — used to dump the main-LLM input once per turn (CA_AUDIT_OUTBOUND).
+# started — used to dump the main-LLM input once per turn (FA_AUDIT_OUTBOUND).
 _turns_seen: Dict[str, int] = {}
 
 
@@ -402,11 +402,11 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
         return await _forward(body)
 
     # This is the main agent loop (it carries tools). Force the model to
-    # MAIN_MODEL so the model is chosen in one place (CA_MAIN_MODEL / CA_MODEL)
+    # MAIN_MODEL so the model is chosen in one place (FA_MAIN_MODEL / FA_MODEL)
     # rather than in the host's config; the host's model id is just a label.
     body["model"] = MAIN_MODEL
 
-    # Drop/keep tools per CA_TOOLS_ALLOW / CA_TOOLS_DENY (default: deny "glob").
+    # Drop/keep tools per FA_TOOLS_ALLOW / FA_TOOLS_DENY (default: deny "glob").
     tools_in = body.get("tools") or []
     kept = _filter_tools(tools_in) or []
     body["tools"] = kept
@@ -440,7 +440,7 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
     boundary = _last_user_index(incoming)
     history, live = incoming[:boundary], incoming[boundary:]
 
-    # Fold every newly-completed turn into context_architect (no threshold).
+    # Fold every newly-completed turn into free_agent (no threshold).
     session = ca.session(x_session_id)
     folded = _folded.get(x_session_id, 0)
     fresh = history[folded:]

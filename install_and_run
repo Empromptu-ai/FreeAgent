@@ -1,44 +1,44 @@
 #!/usr/bin/env bash
 #
-# run-context-architect — idempotent one-shot: set up everything, then run the
-# context_architect proxy and (if requested) keep it running.
+# free-agent — idempotent one-shot: set up everything, then run the
+# free_agent proxy and (if requested) keep it running.
 #
 # Does (only if needed):
 #   1. venv creation (if absent)
-#   2. pip install library + proxy deps (unless CA_SKIP_INSTALL=1)
+#   2. pip install library + proxy deps (unless FA_SKIP_INSTALL=1)
 #   3. .env from .env.example (skipped if .env already exists, unless --force)
-#   4. ollama pull (the model in CA_MODEL from .env / defaults qwen3.6:35b)
+#   4. ollama pull (the model in FA_MODEL from .env / defaults qwen3.6:35b)
 #   5. OpenCode install (curl | bash)
-#   6. writes ~/.config/opencode/opencode.json with the context-architect provider
+#   6. writes ~/.config/opencode/opencode.json with the free-agent provider
 #      (idempotent — merges if the key already exists)
 #   7. places recall_turn.ts into the nearest tools/ directory
-#   8. launches the proxy on CA_PROXY_HOST:CA_PROXY_PORT
+#   8. launches the proxy on FA_PROXY_HOST:FA_PROXY_PORT
 #
 # Usage:
-#   ./run-context-architect [--force] [PROJECT_DIR]
+#   ./free-agent [--force] [PROJECT_DIR]
 #
 # PROJECT_DIR (optional): the folder the interactive CLI should open when
-#   CA_LAUNCH_CLI=1. Precedence: this arg > CA_CLI_DIR in .env > a native folder
+#   FA_LAUNCH_CLI=1. Precedence: this arg > FA_CLI_DIR in .env > a native folder
 #   picker (macOS osascript / Linux zenity|kdialog) > a text prompt > the
 #   directory you ran this from. Proxy sessions are keyed per OpenCode
 #   conversation, so separate conversations never interfere.
 #
 # Handy env toggles (may also live in .env):
-#   CA_SKIP_INSTALL=1   skip pip install AND local Ollama setup (fast restarts)
-#   CA_SKIP_OLLAMA=1    skip only the local Ollama install/serve/pull (use this
+#   FA_SKIP_INSTALL=1   skip pip install AND local Ollama setup (fast restarts)
+#   FA_SKIP_OLLAMA=1    skip only the local Ollama install/serve/pull (use this
 #                       for a REMOTE Ollama — pip install still runs). Point the
 #                       proxy at the remote with OLLAMA_BASE_URL in .env.
 #   OLLAMA_BASE_URL     upstream Ollama the proxy forwards to (default
 #                       http://localhost:11434)
-#   CA_PROXY_HOST       bind host (default 127.0.0.1); opencode.json + the recall
+#   FA_PROXY_HOST       bind host (default 127.0.0.1); opencode.json + the recall
 #                       tool are generated to match it (0.0.0.0/:: → loopback)
-#   CA_PROXY_PORT       bind port (default 49786); opencode.json + the recall
+#   FA_PROXY_PORT       bind port (default 49786); opencode.json + the recall
 #                       tool are generated to match it
 
 set -euo pipefail
 
 # Where the user launched us from — used as the default project folder for the
-# CLI when CA_LAUNCH_CLI=1 and no explicit target is given. Captured BEFORE we
+# CLI when FA_LAUNCH_CLI=1 and no explicit target is given. Captured BEFORE we
 # cd into the repo, because the proxy itself must run from the repo root.
 INVOKE_DIR="$PWD"
 
@@ -61,12 +61,12 @@ THEMES_BASES=(
   "$ROOT_DIR/.opencode/themes"
 )
 
-warn() { echo "[run-context-architect] WARNING: $*" >&2; }
+warn() { echo "[free-agent] WARNING: $*" >&2; }
 
 # The address hosts (OpenCode, the recall tool) use to REACH the proxy. When the
 # proxy binds 0.0.0.0 / :: (all interfaces) clients still connect over loopback.
 proxy_connect_host() {
-  local h="${CA_PROXY_HOST:-127.0.0.1}"
+  local h="${FA_PROXY_HOST:-127.0.0.1}"
   if [ "$h" = "0.0.0.0" ] || [ "$h" = "::" ]; then h="127.0.0.1"; fi
   echo "$h"
 }
@@ -76,9 +76,9 @@ expand_tilde() { printf '%s' "${1/#\~/$HOME}"; }
 # Pop up a native "choose folder" dialog and print the chosen absolute path.
 # Returns non-zero (prints nothing) if no GUI picker is available, there's no
 # display, or the user cancels — callers then fall back to the text prompt.
-# CA_CLI_PICKER=none disables it entirely (straight to the text prompt).
+# FA_CLI_PICKER=none disables it entirely (straight to the text prompt).
 pick_dir_gui() {
-  [ "${CA_CLI_PICKER:-auto}" = "none" ] && return 1
+  [ "${FA_CLI_PICKER:-auto}" = "none" ] && return 1
   local path="" prompt="Choose the project folder for the CLI"
   case "$(uname -s)" in
     Darwin*)
@@ -107,18 +107,18 @@ pick_dir_gui() {
 }
 
 # Resolve the folder the CLI should open (absolute path on stdout). Precedence:
-# positional arg > CA_CLI_DIR > native folder picker > text prompt > invoke dir.
+# positional arg > FA_CLI_DIR > native folder picker > text prompt > invoke dir.
 resolve_cli_dir() {
   local dir=""
   if [ -n "${TARGET_DIR:-}" ]; then
     dir="$TARGET_DIR"
-  elif [ -n "${CA_CLI_DIR:-}" ]; then
-    dir="$CA_CLI_DIR"
+  elif [ -n "${FA_CLI_DIR:-}" ]; then
+    dir="$FA_CLI_DIR"
   else
     # Native picker first (friendliest); fall back to typing a path.
     dir="$(pick_dir_gui || true)"
     if [ -z "$dir" ] && [ -t 0 ]; then
-      printf '\n[run-context-architect] Which project folder should the CLI open?\n  [Enter = %s]: ' "$INVOKE_DIR" >&2
+      printf '\n[free-agent] Which project folder should the CLI open?\n  [Enter = %s]: ' "$INVOKE_DIR" >&2
       read -r dir || true
     fi
     [ -z "$dir" ] && dir="$INVOKE_DIR"
@@ -146,14 +146,14 @@ check_and_install_pkg() {
     return 0
   fi
 
-  echo "[run-context-architect] $prompt_msg not found — installing …"
+  echo "[free-agent] $prompt_msg not found — installing …"
   os=$(uname -s)
 
   case "$os" in
     Darwin*)
       # Try xcode-select --install for curl on macOS without CLT
       if [[ "$cmd" == *curl* ]] && ! xcode-select -p &>/dev/null; then
-        echo "[run-context-architect] installing Xcode Command Line Tools (provides curl) …"
+        echo "[free-agent] installing Xcode Command Line Tools (provides curl) …"
         xcode-select --install 2>/dev/null || { warn "xcode-select failed — install manually"; return 1; }
         if command -v "$cmd" &>/dev/null; then return 0; fi
       fi
@@ -199,13 +199,13 @@ ensure_venv() {
   if [ -x "$VENV_DIR/bin/python" ]; then
     return 0
   fi
-  echo "[run-context-architect] creating virtualenv at $VENV_DIR"
+  echo "[free-agent] creating virtualenv at $VENV_DIR"
   python3 -m venv "$VENV_DIR"
 }
 
 install_deps() {
-  if [ "${CA_SKIP_INSTALL:-0}" = "1" ]; then
-    echo "[run-context-architect] skipping install (CA_SKIP_INSTALL=1)"
+  if [ "${FA_SKIP_INSTALL:-0}" = "1" ]; then
+    echo "[free-agent] skipping install (FA_SKIP_INSTALL=1)"
     return 0
   fi
   source "$VENV_DIR/bin/activate"
@@ -216,7 +216,7 @@ install_deps() {
 ensure_env() {
   local force="${1:-}"
   if [ -f "$DEST_ENV" ] && [ "$force" != "--force" ]; then
-    echo "[run-context-architect] .env already exists — skipping write (use --force to overwrite)"
+    echo "[free-agent] .env already exists — skipping write (use --force to overwrite)"
     return 0
   fi
   if [ ! -f "$SOURCE_ENV" ]; then
@@ -224,13 +224,13 @@ ensure_env() {
     return 0
   fi
   cp "$SOURCE_ENV" "$DEST_ENV"
-  echo "[run-context-architect] copied .env.example -> .env"
+  echo "[free-agent] copied .env.example -> .env"
 }
 
 # shellcheck disable=SC1091
 load_env() {
   if [ -f "$DEST_ENV" ]; then
-    echo "[run-context-architect] loading .env"
+    echo "[free-agent] loading .env"
     set -a
     source "$DEST_ENV"
     set +a
@@ -239,11 +239,11 @@ load_env() {
 
 ensure_ollama_installed() {
    local os=$1
-   local model="${CA_MODEL:-qwen3.6:35b}"
+   local model="${FA_MODEL:-qwen3.6:35b}"
 
    # ---------- install if absent -------------------------------------------------
    if ! command -v ollama &>/dev/null; then
-     echo "[run-context-architect] ollama not found — installing …"
+     echo "[free-agent] ollama not found — installing …"
      case "$os" in
        Darwin*) install_with_brew ollama || { warn "Failed to install ollama via brew"; return 1; } ;;
        Linux*)
@@ -263,7 +263,7 @@ ensure_ollama_installed() {
      fi
      echo "[ok] ollama installed"
    else
-     echo "[run-context-architect] ollama already installed ($(ollama --version 2>/dev/null || echo 'unknown'))"
+     echo "[free-agent] ollama already installed ($(ollama --version 2>/dev/null || echo 'unknown'))"
    fi
 
    # ---------- detect daemon state (process + port) ------------------------------
@@ -287,9 +287,9 @@ ensure_ollama_installed() {
    fi
 
    if [ "$running" = true ]; then
-     echo "[run-context-architect] ollama daemon is already running (port 11434 reachable)"
+     echo "[free-agent] ollama daemon is already running (port 11434 reachable)"
    elif [ "$service_exists" = true ]; then
-     echo "[run-context-architect] ollama service detected but not responding — waiting up to 20 s …"
+     echo "[free-agent] ollama service detected but not responding — waiting up to 20 s …"
      local retries=40
      while [ "$retries" -gt 0 ]; do
        if curl -sf http://127.0.0.1:11434/ &>/dev/null; then
@@ -307,7 +307,7 @@ ensure_ollama_installed() {
      fi
    else
      # Not running, no managed service → start daemon ourselves
-     echo "[run-context-architect] ollama installed but the daemon is not running — starting …"
+     echo "[free-agent] ollama installed but the daemon is not running — starting …"
      ollama serve &>/dev/null &
      local _OLLA_MA_PID=$!
      echo "   started ollama (PID $_OLLA_MA_PID)"
@@ -324,9 +324,9 @@ ensure_ollama_installed() {
 
    # ---------- pull / verify model -----------------------------------------------
    if ollama list 2>/dev/null | grep -qF "$model"; then
-     echo "[run-context-architect] model '$model' is already available — skipping pull"
+     echo "[free-agent] model '$model' is already available — skipping pull"
    else
-     echo "[run-context-architect] pulling model: $model"
+     echo "[free-agent] pulling model: $model"
      ollama pull "$model" || { warn "ollama pull failed for $model (may need network connectivity)"; }
    fi
 
@@ -337,28 +337,28 @@ ensure_opencode() {
   if command -v opencode &>/dev/null; then
     return 0
   fi
-  echo "[run-context-architect] installing OpenCode ..."
+  echo "[free-agent] installing OpenCode ..."
   curl -fsSL https://opencode.ai/install | bash
 }
 
 write_opencode_config() {
   # The model id here is cosmetic — the proxy overrides body["model"] with
-  # CA_MODEL — but track CA_MODEL so /models displays the model actually in use.
-  local model="${CA_MODEL:-qwen3.6:35b}"
+  # FA_MODEL — but track FA_MODEL so /models displays the model actually in use.
+  local model="${FA_MODEL:-qwen3.6:35b}"
   # Point OpenCode at wherever the proxy will actually bind (defaults match the
-  # proxy's own defaults). Change CA_PROXY_PORT in .env and this follows it.
+  # proxy's own defaults). Change FA_PROXY_PORT in .env and this follows it.
   local host port
   host="$(proxy_connect_host)"
-  port="${CA_PROXY_PORT:-49786}"
+  port="${FA_PROXY_PORT:-49786}"
   local provider_block="
-    \"context-architect\": {
+    \"free-agent\": {
       \"npm\": \"@ai-sdk/openai-compatible\",
-      \"name\": \"Ollama (via context_architect)\",
+      \"name\": \"Ollama (via free_agent)\",
       \"options\": {
         \"baseURL\": \"http://$host:$port/v1\",
         \"headers\": { \"x-session-id\": \"opencode\" }
       },
-      \"models\": { \"$model\": { \"name\": \"$model (via context_architect)\" } }
+      \"models\": { \"$model\": { \"name\": \"$model (via free_agent)\" } }
     }"
 
   mkdir -p "$(dirname "$OPENCODE_CONFIG")"
@@ -372,15 +372,20 @@ import json, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
 
-cfg.setdefault('provider', {})['context-architect'] = $provider_block
+cfg.setdefault('provider', {})['free-agent'] = $provider_block
+# Pin the default model to the proxy provider so a fresh OpenCode session
+# starts pointing at free-agent — not at whatever it last used (which, after a
+# provider rename, silently falls back to a built-in model and bypasses the
+# proxy). This is the configured default; the user can still switch via /models.
+cfg['model'] = 'free-agent/$model'
 # Activate the bundled theme only if the user hasn't already chosen one, so we
 # never clobber an existing theme preference.
-cfg.setdefault('theme', 'context-architect')
+cfg.setdefault('theme', 'free-agent')
 json.dump(cfg, sys.stdout, indent=2)
 " "$OPENCODE_CONFIG" 2>/dev/null || true)
       if [ -n "$new_providers" ]; then
         echo "$new_providers" > "$OPENCODE_CONFIG"
-        echo "[run-context-architect] updated $OPENCODE_CONFIG (injected context-architect provider)"
+        echo "[free-agent] updated $OPENCODE_CONFIG (injected free-agent provider)"
         return 0
       fi
     fi
@@ -389,13 +394,14 @@ json.dump(cfg, sys.stdout, indent=2)
   cat > "$OPENCODE_CONFIG" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
-  "theme": "context-architect",
+  "theme": "free-agent",
+  "model": "free-agent/$model",
   "provider": {
 $provider_block
   }
 }
 EOF
-  echo "[run-context-architect] wrote $OPENCODE_CONFIG"
+  echo "[free-agent] wrote $OPENCODE_CONFIG"
 }
 
 place_recall_tool() {
@@ -404,7 +410,7 @@ place_recall_tool() {
   # If the repo doesn't ship a tools/recall_turn.ts, generate the canonical one
   # (kept in sync with the "Add the recall tool" section of the README).
   if [ ! -f "$tool_src" ]; then
-    echo "[run-context-architect] tools/recall_turn.ts not found in repo — generating it"
+    echo "[free-agent] tools/recall_turn.ts not found in repo — generating it"
     mkdir -p "$(dirname "$tool_src")"
     cat > "$tool_src" <<'TS'
 import { tool } from "@opencode-ai/plugin"
@@ -432,14 +438,14 @@ TS
   fi
 
   # The recall tool runs inside OpenCode, not this shell, so it can't read
-  # CA_PROXY_PORT at runtime — bake the proxy's actual address into the file.
+  # FA_PROXY_PORT at runtime — bake the proxy's actual address into the file.
   local host port recall_url
   host="$(proxy_connect_host)"
-  port="${CA_PROXY_PORT:-49786}"
+  port="${FA_PROXY_PORT:-49786}"
   recall_url="http://$host:$port/recall"
 
   # Rewrite only the /recall server address — the tool body itself is never
-  # touched. The address is deployment config (it follows CA_PROXY_HOST/PORT);
+  # touched. The address is deployment config (it follows FA_PROXY_HOST/PORT);
   # the tool definition is not. So we sync the URL in EVERY existing
   # recall_turn.ts on every run, and place one if none exists yet.
   sync_recall_url() {
@@ -454,7 +460,7 @@ TS
     local dest="$dir/recall_turn.ts"
     if [ -f "$dest" ]; then
       sync_recall_url "$dest"
-      echo "[run-context-architect] synced recall_turn.ts URL -> $dest (recall → $recall_url)"
+      echo "[free-agent] synced recall_turn.ts URL -> $dest (recall → $recall_url)"
       existing=true
     fi
   done
@@ -466,7 +472,7 @@ TS
       local dest="$dir/recall_turn.ts"
       cp "$tool_src" "$dest"
       sync_recall_url "$dest"
-      echo "[run-context-architect] placed recall_turn.ts -> $dest (recall → $recall_url)"
+      echo "[free-agent] placed recall_turn.ts -> $dest (recall → $recall_url)"
       placed=true
       break
     done
@@ -475,11 +481,11 @@ TS
 }
 
 place_theme() {
-  local theme_src="$ROOT_DIR/theme/context-architect.json"
+  local theme_src="$ROOT_DIR/theme/free-agent.json"
 
   # Ship the theme in the repo; if it's missing there's nothing to place.
   if [ ! -f "$theme_src" ]; then
-    warn "theme/context-architect.json not found in repo — skipping custom theme"
+    warn "theme/free-agent.json not found in repo — skipping custom theme"
     return 0
   fi
 
@@ -488,14 +494,14 @@ place_theme() {
   local dir dest placed=false
   for dir in "${THEMES_BASES[@]}"; do
     mkdir -p "$dir" || continue
-    dest="$dir/context-architect.json"
+    dest="$dir/free-agent.json"
     if cp "$theme_src" "$dest"; then
-      echo "[run-context-architect] placed theme -> $dest"
+      echo "[free-agent] placed theme -> $dest"
       placed=true
       break
     fi
   done
-  [ "$placed" = true ] || warn "could not place context-architect.json in any themes/ directory"
+  [ "$placed" = true ] || warn "could not place free-agent.json in any themes/ directory"
 }
 
 # ---------- main --------------------------------------------------------------
@@ -511,14 +517,14 @@ done
 
 echo ""
 echo "=========================================="
-echo "  Setting up context-architect …"
+echo "  Setting up free-agent …"
 echo "=========================================="
 
 ensure_system_pkgs  && echo "[ok] system"
 ensure_venv          && echo "[ok] venv"
 install_deps         && echo "[ok] deps installed"
 ensure_env "$FORCE"  && echo "[ok] .env"
-# Load .env NOW, before anything reads CA_MODEL — the model pull and the
+# Load .env NOW, before anything reads FA_MODEL — the model pull and the
 # opencode.json write both depend on it, so a model chosen in .env is honored.
 load_env
 
@@ -527,16 +533,16 @@ load_env
 # conversation (OpenCode sends its own x-session-id), so distinct conversations
 # stay isolated regardless of which folder the CLI opens.
 CLI_DIR=""
-if [ "${CA_LAUNCH_CLI:-0}" = "1" ]; then
+if [ "${FA_LAUNCH_CLI:-0}" = "1" ]; then
   CLI_DIR="$(resolve_cli_dir)"
-  echo "[run-context-architect] CLI will open: $CLI_DIR"
+  echo "[free-agent] CLI will open: $CLI_DIR"
 fi
 
-# Skip the local-Ollama install/serve/pull dance when asked. CA_SKIP_OLLAMA is
+# Skip the local-Ollama install/serve/pull dance when asked. FA_SKIP_OLLAMA is
 # the targeted switch (use it for a REMOTE Ollama: no local daemon, but pip
-# install still runs). CA_SKIP_INSTALL implies it too, for backward-compat.
-if [ "${CA_SKIP_OLLAMA:-0}" = "1" ] || [ "${CA_SKIP_INSTALL:-0}" = "1" ]; then
-  echo "[run-context-architect] skipping local Ollama setup (CA_SKIP_OLLAMA/CA_SKIP_INSTALL=1)"
+# install still runs). FA_SKIP_INSTALL implies it too, for backward-compat.
+if [ "${FA_SKIP_OLLAMA:-0}" = "1" ] || [ "${FA_SKIP_INSTALL:-0}" = "1" ]; then
+  echo "[free-agent] skipping local Ollama setup (FA_SKIP_OLLAMA/FA_SKIP_INSTALL=1)"
 else
   ensure_ollama_installed "$(uname -s)" && echo "[ok] Ollama primed"
 fi
@@ -548,26 +554,26 @@ place_theme          && echo "[ok] theme"
 # Activate the venv for the proxy launch (.env is already loaded above).
 source "$VENV_DIR/bin/activate"
 
-HOST="${CA_PROXY_HOST:-127.0.0.1}"
-PORT="${CA_PROXY_PORT:-49786}"
+HOST="${FA_PROXY_HOST:-127.0.0.1}"
+PORT="${FA_PROXY_PORT:-49786}"
 
 echo ""
 echo "=========================================="
 echo "  Proxy starting on http://$HOST:$PORT"
 echo "=========================================="
 
-if [ "${CA_LAUNCH_CLI:-0}" = "1" ]; then
+if [ "${FA_LAUNCH_CLI:-0}" = "1" ]; then
   # Run the proxy in the background, wait until it's reachable, then hand this
   # same terminal to an interactive CLI session. Quitting the CLI tears the
   # proxy down (via the EXIT trap), so one terminal window = one full session.
-  CLI_CMD="${CA_CLI_CMD:-opencode}"
+  CLI_CMD="${FA_CLI_CMD:-opencode}"
   CONNECT_HOST="$(proxy_connect_host)"
 
-  uvicorn examples.ca_proxy:app --host "$HOST" --port "$PORT" &
+  uvicorn examples.fa_proxy:app --host "$HOST" --port "$PORT" &
   PROXY_PID=$!
   trap 'kill "$PROXY_PID" 2>/dev/null || true' EXIT
 
-  echo "[run-context-architect] waiting for the proxy to accept connections …"
+  echo "[free-agent] waiting for the proxy to accept connections …"
   retries=40
   while [ "$retries" -gt 0 ]; do
     # No -f: the proxy has no health route, so any HTTP response (even 404)
@@ -584,11 +590,11 @@ if [ "${CA_LAUNCH_CLI:-0}" = "1" ]; then
     retries=$((retries - 1))
   done
 
-  echo "[run-context-architect] launching CLI in $CLI_DIR: $CLI_CMD  (quit it to stop the proxy)"
+  echo "[free-agent] launching CLI in $CLI_DIR: $CLI_CMD  (quit it to stop the proxy)"
   # Open the CLI in the chosen project folder (a subshell, so our cwd stays the
   # repo root for the proxy). Don't let a non-zero CLI exit (e.g. Ctrl-C) abort
   # before the EXIT trap runs.
   ( cd "$CLI_DIR" && exec $CLI_CMD ) || true
 else
-  exec uvicorn examples.ca_proxy:app --host "$HOST" --port "$PORT"
+  exec uvicorn examples.fa_proxy:app --host "$HOST" --port "$PORT"
 fi

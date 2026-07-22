@@ -8,8 +8,8 @@ from typing import Any, Dict, List
 from .config import Config
 from .llm.base import LLMBackend, complete_json
 from .models import (
-    CA_KIND,
-    CA_SUMMARY,
+    FA_KIND,
+    FA_SUMMARY,
     KIND_FULL_TURN,
     KIND_SUMMARY,
     Message,
@@ -94,7 +94,7 @@ def summarize_turn(
         role=Role.ASSISTANT,
         blocks=[TextBlock(text=rendered)],
         metadata={
-            CA_KIND: KIND_SUMMARY,
+            FA_KIND: KIND_SUMMARY,
             "archive_key": archive_key,
             "label": label,
             "turn": turn_index,
@@ -129,7 +129,7 @@ def build_full_turn(
     with no retained blocks are dropped so the model never sees empty turns.
 
     The first ("head") kept message carries the rendered summary text under
-    ``CA_SUMMARY`` so the turn can be demoted to a plain summary once it ages out
+    ``FA_SUMMARY`` so the turn can be demoted to a plain summary once it ages out
     of the window, without a second summarization call.
 
     Returns ``(messages, had_content)``. When ``had_content`` is False the turn
@@ -147,9 +147,9 @@ def build_full_turn(
         ]
         if not blocks:
             continue
-        metadata = {CA_KIND: KIND_FULL_TURN, "turn": turn_index}
+        metadata = {FA_KIND: KIND_FULL_TURN, "turn": turn_index}
         if not kept:
-            metadata[CA_SUMMARY] = summary_text
+            metadata[FA_SUMMARY] = summary_text
             metadata["archive_key"] = archive_key
         kept.append(Message(role=m.role, blocks=blocks, metadata=metadata))
     return kept, bool(kept)

@@ -1,4 +1,4 @@
-"""OpenAI backend (optional extra: ``pip install context_architect[openai]``)."""
+"""OpenAI backend (optional extra: ``pip install free_agent[openai]``)."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class OpenAIBackend:
             import openai  # noqa: F401
         except ImportError as e:  # pragma: no cover - depends on extra
             raise LLMError(
-                "the openai package is required: pip install context_architect[openai]"
+                "the openai package is required: pip install free_agent[openai]"
             ) from e
         import openai
 

@@ -2,7 +2,7 @@
 
 This is the canonical internal representation the library operates on. Host
 systems convert their provider-native messages into these types (see
-``context_architect.adapters``) before handing them to a :class:`Session`.
+``free_agent.adapters``) before handing them to a :class:`Session`.
 
 Every type is JSON round-trippable via ``to_dict`` / ``from_dict`` so the full
 context can be archived to disk and reloaded on resume/fork.
@@ -148,16 +148,16 @@ _BLOCK_TYPES = {
 
 # Well-known metadata keys the library uses to re-identify its own injected
 # messages when a later turn's context comes back in.
-CA_KIND = "ca_kind"
+FA_KIND = "fa_kind"
 KIND_PINNED = "pinned"
 KIND_SUMMARY = "summary"
 KIND_FILE_LEDGER = "file_ledger"
 # A completed turn kept as its full text (text blocks only) inside the recency
-# window. The turn's head message additionally carries CA_SUMMARY (the rendered
+# window. The turn's head message additionally carries FA_SUMMARY (the rendered
 # summary text) so it can be demoted to a summary once it ages out — without a
 # second summarization call.
 KIND_FULL_TURN = "full_turn"
-CA_SUMMARY = "ca_summary"
+FA_SUMMARY = "fa_summary"
 
 
 @dataclass
@@ -171,8 +171,8 @@ class Message:
             self.role = Role(self.role)
 
     @property
-    def ca_kind(self) -> Optional[str]:
-        return self.metadata.get(CA_KIND)
+    def fa_kind(self) -> Optional[str]:
+        return self.metadata.get(FA_KIND)
 
     def text(self) -> str:
         """Concatenate all textual content for rendering / token estimation."""

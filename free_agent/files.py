@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 from .config import Config
 from .llm.base import LLMBackend, complete_json
 from .models import (
-    CA_KIND,
+    FA_KIND,
     KIND_FILE_LEDGER,
     Message,
     Role,
@@ -277,5 +277,5 @@ class FileLedger:
         return Message(
             role=Role.USER,
             blocks=[TextBlock(text="\n".join(lines))],
-            metadata={CA_KIND: KIND_FILE_LEDGER},
+            metadata={FA_KIND: KIND_FILE_LEDGER},
         )

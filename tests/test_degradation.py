@@ -6,8 +6,8 @@ raised out of ``rework``, freezing the compacted history and — via the proxy's
 unadvanced fold pointer — making every subsequent turn disappear.
 """
 
-from context_architect.models import (
-    CA_SUMMARY,
+from free_agent.models import (
+    FA_SUMMARY,
     KIND_FILE_LEDGER,
     KIND_SUMMARY,
     Message,
@@ -16,7 +16,7 @@ from context_architect.models import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from helpers import make_architect
+from helpers import make_agent
 
 
 class BrokenBackend:
@@ -36,8 +36,8 @@ def _turn(text, path):
 
 
 def test_broken_backend_does_not_abort_rework(tmp_path):
-    ca = make_architect(tmp_path, num_full_text_turns=1)
-    s = ca.session("broken")
+    fa = make_agent(tmp_path, num_full_text_turns=1)
+    s = fa.session("broken")
     s.backend = BrokenBackend()
 
     pinned = Message(role=Role.SYSTEM, blocks=[TextBlock(text="you are an agent")])
@@ -53,7 +53,7 @@ def test_broken_backend_does_not_abort_rework(tmp_path):
 
     # Older turns still fall back to summaries (not dropped); the newest stays
     # full text. Degradation produced usable summary text, not an empty message.
-    summaries = [m for m in h if m.ca_kind == KIND_SUMMARY]
+    summaries = [m for m in h if m.fa_kind == KIND_SUMMARY]
     assert summaries, "older turns should demote to (fallback) summaries"
     assert all(m.text().strip() for m in summaries)
 
@@ -62,10 +62,10 @@ def test_broken_backend_does_not_abort_rework(tmp_path):
 
     # The ledger tracked every touched file even though description refinement
     # (also an LLM call) failed.
-    ledger = [m for m in h if m.ca_kind == KIND_FILE_LEDGER][0]
+    ledger = [m for m in h if m.fa_kind == KIND_FILE_LEDGER][0]
     for path in ("a.py", "b.py", "c.py"):
         assert path in ledger.text()
 
     # State persisted normally despite the failures.
-    reworks = [r for r in ca.store.read_audit("broken") if r["event"] == "rework"]
+    reworks = [r for r in fa.store.read_audit("broken") if r["event"] == "rework"]
     assert len(reworks) == 3
