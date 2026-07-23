@@ -569,7 +569,12 @@ if [ "${FA_LAUNCH_CLI:-0}" = "1" ]; then
   CLI_CMD="${FA_CLI_CMD:-opencode}"
   CONNECT_HOST="$(proxy_connect_host)"
 
-  uvicorn examples.fa_proxy:app --host "$HOST" --port "$PORT" &
+  # Redirect all proxy / uvicorn output to a log file so it doesn't overlay
+  # the interactive opencode session. The user can still follow logs with:
+  #   tail -f ~/.free_agent/proxy.log  (or see the location printed below).
+  PROXY_LOG="${FA_PROXY_LOG:-${HOME}/.free_agent/proxy.log}"
+  mkdir -p "$(dirname "$PROXY_LOG")"
+  uvicorn examples.fa_proxy:app --host "$HOST" --port "$PORT" >>"$PROXY_LOG" 2>&1 &
   PROXY_PID=$!
   trap 'kill "$PROXY_PID" 2>/dev/null || true' EXIT
 
