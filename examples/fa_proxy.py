@@ -77,6 +77,16 @@ Environment:
     FA_AUDIT_FULL     set to 1 to dump the complete interleaved turn (in-flight
                       messages + tool calls + tool results + final answer) to
                       {root}/{session}/turn-NNN-full_transcript.json
+    FA_CONTINUE_ON_EMPTY
+                      set to 1 to transparently re-ask the model when it returns
+                      an empty final message (no content, no tool calls). The
+                      proxy appends a "please continue." nudge and returns the
+                      non-empty result; the nudge never reaches the host's
+                      transcript or free_agent's summaries. Off by default.
+    FA_CONTINUE_MAX   max retries before giving up and forwarding the empty
+                      response as-is (default 2).
+    FA_CONTINUE_MSG   the nudge text sent on an empty reply (default
+                      "please continue.").
 """
 
 from __future__ import annotations
@@ -126,6 +136,21 @@ AUDIT_OUTBOUND = os.environ.get("FA_AUDIT_OUTBOUND") == "1"
 AUDIT_INBOUND = os.environ.get("FA_AUDIT_INBOUND") == "1"
 AUDIT_FULL = os.environ.get("FA_AUDIT_FULL") == "1"
 NUM_FULL_TEXT_TURNS = int(os.environ.get("FA_NUM_FULL_TEXT_TURNS", "1"))
+
+# --- Continue-on-empty ------------------------------------------------------
+# Some models occasionally return an empty final message (no content, no tool
+# calls) — opencode then shows a blank assistant turn. When enabled, the proxy
+# transparently re-asks the model with a "please continue." nudge and returns
+# the non-empty result instead. The nudge lives only inside the proxy's retry
+# request; it never reaches opencode's transcript or free_agent's summaries, so
+# from the host's seat the model simply answered normally.
+#   FA_CONTINUE_ON_EMPTY  set to 1 to enable (default off).
+#   FA_CONTINUE_MAX       max retries before giving up and returning the empty
+#                         response as-is (default 2).
+#   FA_CONTINUE_MSG       the nudge text (default "please continue.").
+CONTINUE_ON_EMPTY = os.environ.get("FA_CONTINUE_ON_EMPTY") == "1"
+CONTINUE_MAX = int(os.environ.get("FA_CONTINUE_MAX", "2"))
+CONTINUE_MSG = os.environ.get("FA_CONTINUE_MSG", "please continue.")
 
 # --- System-prompt override -------------------------------------------------
 # Master switch: the override only applies when FA_SYSTEM_OVERRIDE=1, so you can
@@ -240,6 +265,14 @@ async def _lifespan(_app: FastAPI):
         flush=True,
     )
     print(f"   full-text : last {NUM_FULL_TEXT_TURNS} turns kept verbatim", flush=True)
+    if CONTINUE_ON_EMPTY:
+        print(
+            f"   continue  : on empty reply, nudge {CONTINUE_MSG!r} "
+            f"(max {CONTINUE_MAX} retries)",
+            flush=True,
+        )
+    else:
+        print("   continue  : off (empty replies pass through)", flush=True)
     if SYSTEM_OVERRIDE and SYSTEM_PROMPT:
         src = str(_resolve_prompt_path(_sp_file)) if _sp_file else "FA_SYSTEM_PROMPT"
         print(f"   sys-prompt: OVERRIDE on ({SYSTEM_MODE}) ← {src}", flush=True)
@@ -330,6 +363,11 @@ class _StreamAcc:
                     if fn.get("arguments"):
                         slot["function"]["arguments"] += fn["arguments"]
 
+    def has_content(self) -> bool:
+        """True once a real content token or any tool call has arrived. Used to
+        decide, mid-stream, whether the response is going to be non-empty."""
+        return bool("".join(self.content).strip()) or bool(self.tool_calls)
+
     def message(self) -> Dict[str, Any]:
         msg: Dict[str, Any] = {"role": self.role, "content": "".join(self.content)}
         if self.tool_calls:
@@ -371,40 +409,115 @@ def _last_user_index(messages: List[Dict[str, Any]]) -> int:
     return 0
 
 
+def _msg_is_empty(msg: Dict[str, Any]) -> bool:
+    """An assistant message counts as empty when it has no textual content AND
+    no tool calls. A tool call is never empty — the host will act on it."""
+    content = msg.get("content") or ""
+    if isinstance(content, list):  # anthropic-style block list
+        content = "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return not str(content).strip() and not msg.get("tool_calls")
+
+
+def _continue_body(body: Dict[str, Any], prev_msg: Dict[str, Any]) -> Dict[str, Any]:
+    """A shallow copy of ``body`` with the model's (empty) reply and a
+    "please continue." nudge appended. This lives only in the retry request; it
+    is never persisted to the host or to free_agent."""
+    nb = dict(body)
+    assistant: Dict[str, Any] = {"role": "assistant", "content": prev_msg.get("content") or ""}
+    if prev_msg.get("tool_calls"):
+        assistant["tool_calls"] = prev_msg["tool_calls"]
+    nb["messages"] = list(body.get("messages") or []) + [
+        assistant,
+        {"role": "user", "content": CONTINUE_MSG},
+    ]
+    return nb
+
+
 async def _forward(
     body: Dict[str, Any],
     capture: Optional[Callable[[Dict[str, Any]], None]] = None,
+    allow_continue: bool = False,
 ):
     """Forward a (possibly rewritten) request to Ollama, streaming-aware.
 
     If ``capture`` is given, the reconstructed assistant message the model
     returns is handed to it (after streaming completes, without altering the
-    bytes forwarded to the client)."""
+    bytes forwarded to the client).
+
+    If ``allow_continue`` is set and FA_CONTINUE_ON_EMPTY is on, an empty
+    response (no content, no tool calls) triggers a transparent retry with a
+    "please continue." nudge, up to FA_CONTINUE_MAX times. For streaming we hold
+    chunks back only until the first real content token arrives, so a normal
+    response streams with negligible added latency; an empty one is discarded
+    and the retry is streamed in its place."""
     url = f"{OLLAMA}/v1/chat/completions"
+    do_continue = allow_continue and CONTINUE_ON_EMPTY
+
     if body.get("stream"):
 
         async def gen():
-            acc = _StreamAcc() if capture else None
-            async with httpx.AsyncClient(timeout=None) as client:
-                async with client.stream("POST", url, json=body) as r:
-                    async for chunk in r.aiter_raw():
-                        if acc is not None:
+            attempt_body = body
+            for attempt in range(CONTINUE_MAX + 1):
+                acc = _StreamAcc()
+                buffer: List[bytes] = []
+                flushed = False
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream("POST", url, json=attempt_body) as r:
+                        async for chunk in r.aiter_raw():
                             acc.feed(chunk)
-                        yield chunk
-            if acc is not None:
-                capture(acc.message())
+                            if flushed:
+                                yield chunk
+                            else:
+                                buffer.append(chunk)
+                                if acc.has_content():
+                                    for b in buffer:
+                                        yield b
+                                    buffer = []
+                                    flushed = True
+                # Stream finished. If real content ever arrived it's already sent.
+                if flushed:
+                    if capture is not None:
+                        capture(acc.message())
+                    return
+                # Empty response: retry with a nudge, or give up and forward it.
+                if do_continue and attempt < CONTINUE_MAX:
+                    print(
+                        f"[continue] empty stream response, retrying "
+                        f"({attempt + 1}/{CONTINUE_MAX})",
+                        flush=True,
+                    )
+                    attempt_body = _continue_body(attempt_body, acc.message())
+                    continue
+                for b in buffer:
+                    yield b
+                if capture is not None:
+                    capture(acc.message())
+                return
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    async with httpx.AsyncClient(timeout=None) as client:
-        r = await client.post(url, json=body)
-    data = r.json()
-    if capture is not None:
+    attempt_body = body
+    for attempt in range(CONTINUE_MAX + 1):
+        async with httpx.AsyncClient(timeout=None) as client:
+            r = await client.post(url, json=attempt_body)
+        data = r.json()
         try:
-            capture(data["choices"][0]["message"])
+            msg = data["choices"][0]["message"]
         except Exception:
-            pass
-    return JSONResponse(data, status_code=r.status_code)
+            msg = None
+        if do_continue and msg is not None and _msg_is_empty(msg) and attempt < CONTINUE_MAX:
+            print(
+                f"[continue] empty response, retrying ({attempt + 1}/{CONTINUE_MAX})",
+                flush=True,
+            )
+            attempt_body = _continue_body(attempt_body, msg)
+            continue
+        if capture is not None and msg is not None:
+            try:
+                capture(msg)
+            except Exception:
+                pass
+        return JSONResponse(data, status_code=r.status_code)
 
 
 @app.post("/v1/chat/completions")
@@ -505,7 +618,7 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
             if AUDIT_FULL:
                 _dump_full_transcript(_sid, _tn, _live, msg)
 
-    return await _forward(body, capture=capture)
+    return await _forward(body, capture=capture, allow_continue=True)
 
 
 @app.post("/recall")
