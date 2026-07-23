@@ -58,7 +58,7 @@ class Config:
     # messages (text blocks only) in the live context instead of a summary.
     # Older turns fall back to the summarized form. 0 reproduces the original
     # behavior (every completed turn is a summary immediately).
-    num_full_text_turns: int = 3
+    num_full_text_turns: int = 1
 
     # How many leading system messages to treat as pinned setup when none are
     # explicitly tagged. The contiguous leading system run is pinned regardless;

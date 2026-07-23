@@ -115,12 +115,12 @@ When your agent finishes a turn and hands the full context to the library, it:
    one-line description per file (understanding accumulates, it is not overwritten).
 4. **Reassembles** a canonical compact history: `pinned → older summaries →
    recent full-text turns → file ledger`. The most recent
-   `num_full_text_turns` completed turns (default **3**) are kept as their full
+   `num_full_text_turns` completed turns (default **1**) are kept as their full
    text — the text messages only, with tool use and file reads stripped —
    instead of a summary; every older turn falls back to its summary. Each turn
    is still summarized and archived regardless, so a turn aging out of the
    window is demoted to its already-computed summary with no extra LLM call.
-   Set `num_full_text_turns=0` (env: `FA_NUM_FULL_TEXT_TURNS=0`) for the classic
+   Set `num_full_text_turns=1` (env: `FA_NUM_FULL_TEXT_TURNS=0`) for the classic
    summarize-every-turn behavior.
 5. **Persists** everything keyed to the session id so resume/fork reproduce state.
 6. **Audits** exactly what went in and came out to `audit.log`.
@@ -316,7 +316,7 @@ export FA_MODEL=qwen3.6:35b          # single source of truth: main agent loop +
 #export FA_REASONING=medium           # optional: agent-loop reasoning effort (off|low|medium|high); unset = model default
 #export FA_SUMM_REASONING=off         # optional: reasoning for the internal summary/ledger calls; default OFF (see note)
 export FA_STORAGE_ROOT=~/.free_agent
-export FA_NUM_FULL_TEXT_TURNS=2      # keep the last N turns as full text (0 = summaries only)
+export FA_NUM_FULL_TEXT_TURNS=1      # keep the last N turns as full text (0 = summaries only)
 export FA_TOOLS_DENY=glob            # drop these tools from the host's set (default: glob); empty = pass all
 #export FA_TOOLS_ALLOW=read,edit,grep # keep ONLY these (allowlist); wins over FA_TOOLS_DENY
 export FA_AUDIT_OUTBOUND=1           # dump the exact main-LLM input per turn
@@ -462,7 +462,7 @@ each call). When a summary isn't enough, the model calls `recall_turn` with the
 - **One-turn lag.** Because the proxy runs before the model answers, a turn is
   summarized when the *next* turn arrives — so the first `turn-0001.json` appears
   once the second exchange starts, not during the first.
-- **Recency window (`FA_NUM_FULL_TEXT_TURNS`, default 2).** The last N completed
+- **Recency window (`FA_NUM_FULL_TEXT_TURNS`, default 1).** The last N completed
   turns are kept in the live context as their full text (text messages only —
   tool use and file reads are stripped, since those surface through the file
   ledger and are recoverable via `recall_turn`); older turns are summaries. Turns
