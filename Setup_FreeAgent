@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+#
+# Setup_FreeAgent — friendly, interactive .env builder for FreeAgent.
+#
+# A novice can run this with nothing installed beforehand. On startup it makes
+# sure a .env exists — seeding one from .env.example if there isn't one yet —
+# and from then on it reads from, and writes back to, that .env. Every setting
+# is shown with plain-language help pulled from the file's own comments. When
+# saving over an existing .env, the previous version is backed up to .env.bak.
+#
+# This does NOT touch ./FreeAgent or run the proxy — it only manages .env.
+# After running this, start things the usual way:  ./FreeAgent
+#
+# Usage:
+#   ./Setup_FreeAgent            interactive menu + guided walkthrough
+#   ./Setup_FreeAgent --print    print the current settings to stdout (.env, or
+#                                 .env.example if no .env exists yet); no changes
+#   ./Setup_FreeAgent --help
+#
+# Pure bash 3.2 (Apple's default) — no dependencies beyond sed/grep/awk.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXAMPLE_FILE="$ROOT_DIR/.env.example"   # seed template, used only if .env is missing
+ENV_FILE="$ROOT_DIR/.env"               # the working file we read from and write to
+SRC="$ENV_FILE"                         # file currently being parsed/rendered (set in main)
+ENV_PREEXISTED=1                        # 0 if we created .env during this run
+
+# ---- parsed schema (parallel indexed arrays; index i == one variable) --------
+KEYS=()       # variable name
+SECS=()       # section title it lives under
+HELPS=()      # help text (may contain embedded newlines)
+DEFS=()       # default value from .env.example
+OPT=()        # 1 if the template had it commented-out (optional), else 0
+CUR=()        # current/working value
+SET=()        # 1 if it should be written (uncommented), else 0
+SECTIONS_LIST=()   # ordered, de-duplicated list of section titles
+
+warn() { echo "[setup] WARNING: $*" >&2; }
+die()  { echo "[setup] ERROR: $*" >&2; exit 1; }
+
+# Make sure a .env exists before we do anything else. If it's missing, seed it
+# from .env.example so the rest of the script can always work off .env. Sets
+# ENV_PREEXISTED so save time knows whether there's a prior file worth backing up.
+ensure_env_exists() {
+  if [ -f "$ENV_FILE" ]; then
+    ENV_PREEXISTED=1
+    return 0
+  fi
+  [ -f "$EXAMPLE_FILE" ] || die "neither .env nor .env.example found in $ROOT_DIR — nothing to configure."
+  cp "$EXAMPLE_FILE" "$ENV_FILE"
+  ENV_PREEXISTED=0
+  echo "[setup] no .env found — created one from .env.example"
+}
+
+# ---- small helpers -----------------------------------------------------------
+idx_of() {  # print array index of a key, return 1 if absent
+  local k="$1" i
+  for i in "${!KEYS[@]}"; do
+    [ "${KEYS[$i]}" = "$k" ] && { printf '%s' "$i"; return 0; }
+  done
+  return 1
+}
+
+add_section() {
+  local s="$1" x
+  for x in "${SECTIONS_LIST[@]:-}"; do [ "$x" = "$s" ] && return 0; done
+  SECTIONS_LIST+=("$s")
+}
+
+# Interpret a raw right-hand-side from a .env line the way `source` would:
+# strip an unquoted inline "  # comment", trim trailing space, or unwrap quotes.
+parse_env_value() {
+  local v="$1"
+  case "$v" in
+    \"*) v="${v#\"}"; v="${v%%\"*}" ;;
+    \'*) v="${v#\'}"; v="${v%%\'*}" ;;
+    *)   v="$(printf '%s' "$v" | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//')" ;;
+  esac
+  printf '%s' "$v"
+}
+
+# Format KEY=value for writing, quoting/escaping only when the value needs it
+# (so ~, :, /, etc. stay literal & unquoted — tilde still expands on source).
+emit_kv() {
+  local k="$1" v="$2"
+  if [ -z "$v" ]; then printf '%s=\n' "$k"; return; fi
+  if printf '%s' "$v" | LC_ALL=C grep -q '[^[:alnum:]_./:@,~+-]'; then
+    local e="$v"
+    e="${e//\\/\\\\}"   # backslash first
+    e="${e//\"/\\\"}"
+    e="${e//\$/\\\$}"
+    e="${e//\`/\\\`}"
+    printf '%s="%s"\n' "$k" "$e"
+  else
+    printf '%s=%s\n' "$k" "$v"
+  fi
+}
+
+# ---- template parsing --------------------------------------------------------
+parse_config() {
+  [ -f "$SRC" ] || die "no config file to read at $SRC"
+  local line section="" help="" h body key val opt
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Section header:  # --- Title -------------------------
+    case "$line" in
+      '# --- '*)
+        section="$(printf '%s\n' "$line" | sed -E 's/^# --- //; s/[[:space:]]*-{2,}[[:space:]]*$//')"
+        add_section "$section"
+        help=""
+        continue
+        ;;
+    esac
+    # Variable line (set or commented-out):  KEY=...   or   #KEY=...
+    if [[ "$line" =~ ^#?[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      opt=0; body="$line"
+      case "$line" in \#*) opt=1; body="${line#\#}" ;; esac
+      key="${body%%=*}"
+      val="$(parse_env_value "${body#*=}")"
+      # A file may have settings before any "# --- " header — keep them reachable.
+      if [ -z "$section" ]; then section="(ungrouped)"; add_section "$section"; fi
+      KEYS+=("$key"); SECS+=("$section"); HELPS+=("$help")
+      DEFS+=("$val"); OPT+=("$opt"); CUR+=("$val"); SET+=("$([ "$opt" -eq 1 ] && echo 0 || echo 1)")
+      help=""
+      continue
+    fi
+    # Otherwise: a help comment (accumulate) or a blank/other line (reset).
+    case "$line" in
+      '#'*)
+        h="${line#\#}"; h="${h# }"
+        if [ -z "$help" ]; then help="$h"; else help="$help"$'\n'"$h"; fi
+        ;;
+      *) help="" ;;
+    esac
+  done < "$SRC"
+}
+
+# ---- field types -------------------------------------------------------------
+field_type() {
+  case "$1" in
+    FA_SKIP_OLLAMA|FA_AUDIT_OUTBOUND|FA_AUDIT_INBOUND|FA_AUDIT_FULL|FA_SYSTEM_OVERRIDE|FA_LAUNCH_CLI)
+      echo bool ;;
+    FA_REASONING|FA_MAIN_REASONING|FA_SUMM_REASONING)
+      echo "enum:off low medium high" ;;
+    FA_SYSTEM_MODE)
+      echo "enum:replace prefix prefix_env suffix" ;;
+    FA_NUM_FULL_TEXT_TURNS)
+      echo int ;;
+    FA_STORAGE_ROOT|FA_SYSTEM_PROMPT_FILE|FA_CLI_DIR)
+      echo path ;;
+    *) echo text ;;
+  esac
+}
+
+# ---- display -----------------------------------------------------------------
+disp() {  # human-readable current value for index $1
+  local i="$1"
+  if [ "${OPT[$i]}" = "1" ] && [ "${SET[$i]}" = "0" ]; then printf '(unset)'; return; fi
+  if [ -z "${CUR[$i]}" ]; then printf '(empty)'; return; fi
+  printf '%s' "${CUR[$i]}"
+}
+
+# ---- editing a single field --------------------------------------------------
+apply_value() {  # index, answer  (already past the "keep on empty" check)
+  local i="$1" ans="$2"
+  if [ "$ans" = "-" ]; then
+    if [ "${OPT[$i]}" = "1" ]; then SET[$i]="0"; else CUR[$i]=""; SET[$i]="1"; fi
+  else
+    CUR[$i]="$ans"; SET[$i]="1"
+  fi
+  echo "   -> now: $(disp "$i")"
+}
+
+edit_field() {
+  local i="$1"; local key="${KEYS[$i]}"; local ft ans; ft="$(field_type "$key")"
+  echo
+  echo "---- $key ----"
+  [ -n "${HELPS[$i]}" ] && printf '%s\n' "${HELPS[$i]}" | sed 's/^/   /'
+  echo "   current: $(disp "$i")"
+  if [ "${OPT[$i]}" = "1" ]; then
+    echo "   (Enter = keep, '-' = leave unset)"
+  else
+    echo "   (Enter = keep, '-' = set empty)"
+  fi
+
+  case "$ft" in
+    bool)
+      printf '   > yes / no: '
+      IFS= read -r ans || return 0
+      [ -z "$ans" ] && return 0
+      case "$ans" in
+        -)                    apply_value "$i" "-" ;;
+        y|Y|yes|Yes|YES|1)    apply_value "$i" "1" ;;
+        n|N|no|No|NO|0)       apply_value "$i" "0" ;;
+        *) echo "   ! type yes or no"; edit_field "$i" ;;
+      esac
+      ;;
+    enum:*)
+      local vals="${ft#enum:}" v n=1; local -a arr=($vals)
+      echo "   options:"
+      for v in "${arr[@]}"; do echo "     $n) $v"; n=$((n+1)); done
+      printf '   > pick a number: '
+      IFS= read -r ans || return 0
+      [ -z "$ans" ] && return 0
+      if [ "$ans" = "-" ]; then apply_value "$i" "-"; return 0; fi
+      if [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le "${#arr[@]}" ]; then
+        apply_value "$i" "${arr[$((ans-1))]}"
+      else
+        echo "   ! pick one of the listed numbers"; edit_field "$i"
+      fi
+      ;;
+    int)
+      printf '   > whole number: '
+      IFS= read -r ans || return 0
+      [ -z "$ans" ] && return 0
+      if [ "$ans" = "-" ]; then apply_value "$i" "-"; return 0; fi
+      if [[ "$ans" =~ ^[0-9]+$ ]]; then apply_value "$i" "$ans"
+      else echo "   ! digits only"; edit_field "$i"; fi
+      ;;
+    path)
+      printf '   > path: '
+      IFS= read -r ans || return 0
+      [ -z "$ans" ] && return 0
+      if [ "$ans" = "-" ]; then apply_value "$i" "-"; return 0; fi
+      local expanded="${ans/#\~/$HOME}"
+      if [ -e "$expanded" ]; then echo "   (found: $expanded)"; else echo "   (note: '$expanded' doesn't exist yet)"; fi
+      apply_value "$i" "$ans"
+      ;;
+    *)
+      printf '   > new value: '
+      IFS= read -r ans || return 0
+      [ -z "$ans" ] && return 0
+      apply_value "$i" "$ans"
+      ;;
+  esac
+}
+
+# ---- menus -------------------------------------------------------------------
+walkthrough() {
+  local i
+  for i in "${!KEYS[@]}"; do edit_field "$i"; done
+  echo; echo "[setup] Walkthrough complete — back to the menu (choose 's' to save)."
+}
+
+section_menu() {
+  local sidx="$1"; local sname="${SECTIONS_LIST[$sidx]}"
+  while true; do
+    echo
+    echo "==== $sname ===="
+    local -a fidx=(); local i n=1 ans
+    for i in "${!KEYS[@]}"; do
+      if [ "${SECS[$i]}" = "$sname" ]; then
+        fidx+=("$i")
+        printf '  %2d) %-26s %s\n' "$n" "${KEYS[$i]}" "$(disp "$i")"
+        n=$((n+1))
+      fi
+    done
+    echo "   b) back to main menu"
+    printf '> '
+    IFS= read -r ans || ans=b
+    case "$ans" in
+      b|B|'') return 0 ;;
+      *)
+        if [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le "${#fidx[@]}" ]; then
+          edit_field "${fidx[$((ans-1))]}"
+        else
+          echo "   ! not a listed choice"
+        fi
+        ;;
+    esac
+  done
+}
+
+main_menu() {
+  while true; do
+    echo
+    echo "============================================"
+    echo "  FreeAgent .env setup"
+    echo "============================================"
+    echo "Pick a section to edit, or walk through everything:"
+    echo
+    local n=1 s
+    for s in "${SECTIONS_LIST[@]}"; do
+      printf '  %2d) %s\n' "$n" "$s"
+      n=$((n+1))
+    done
+    echo
+    echo "   a) Walk through every setting (guided)"
+    echo "   s) Save .env and exit"
+    echo "   q) Quit without saving"
+    printf '> '
+    local ans; IFS= read -r ans || ans=q
+    case "$ans" in
+      a|A) walkthrough ;;
+      s|S) save_and_exit; return 0 ;;
+      q|Q) echo "[setup] No changes written."; return 0 ;;
+      '')  ;;
+      *)
+        if [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le "${#SECTIONS_LIST[@]}" ]; then
+          section_menu "$((ans-1))"
+        else
+          echo "   ! not a listed choice"
+        fi
+        ;;
+    esac
+  done
+}
+
+# ---- rendering & saving ------------------------------------------------------
+# Re-emit .env.example verbatim, swapping in chosen values on variable lines.
+# This preserves every comment/section so the resulting .env stays self-documenting.
+render_env() {
+  local line body key i
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^#?[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      body="$line"; case "$line" in \#*) body="${line#\#}" ;; esac
+      key="${body%%=*}"
+      if i="$(idx_of "$key")"; then
+        if [ "${SET[$i]}" = "1" ]; then
+          emit_kv "$key" "${CUR[$i]}"
+        else
+          printf '%s\n' "$line"   # optional & unset: keep template's commented line
+        fi
+        continue
+      fi
+    fi
+    printf '%s\n' "$line"
+  done < "$SRC"
+}
+
+save_and_exit() {
+  if [ "$ENV_PREEXISTED" = "1" ]; then
+    printf '[setup] Save changes to .env (a backup of the current file goes to .env.bak)? [y/N]: '
+    local yn; IFS= read -r yn || yn=n
+    case "$yn" in y|Y|yes|Yes) ;; *) echo "[setup] Not saved."; return 0 ;; esac
+    cp "$ENV_FILE" "$ENV_FILE.bak"
+    echo "[setup] backed up current .env -> .env.bak"
+  fi
+  local tmp="$ENV_FILE.tmp.$$"
+  render_env > "$tmp"
+  mv "$tmp" "$ENV_FILE"
+  echo "[setup] wrote $ENV_FILE"
+  echo "[setup] Done. Start it with:  ./FreeAgent"
+}
+
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
+
+# ---- main --------------------------------------------------------------------
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --print)
+    # Side-effect-free dump: read .env if present, else fall back to .env.example.
+    if [ -f "$ENV_FILE" ]; then SRC="$ENV_FILE"; else SRC="$EXAMPLE_FILE"; fi
+    parse_config; render_env; exit 0 ;;
+  '') ;;
+  *) die "unknown argument: $1 (try --help)" ;;
+esac
+
+if [ ! -t 0 ]; then
+  die "no interactive terminal. Run ./Setup_FreeAgent in a terminal, or use --print for a non-interactive dump."
+fi
+
+ensure_env_exists      # seed .env from .env.example if it's missing
+SRC="$ENV_FILE"        # from here on we read from and write to .env
+parse_config
+[ "${#KEYS[@]}" -gt 0 ] || die "no settings found in $ENV_FILE — is it empty or malformed?"
+
+echo
+if [ "$ENV_PREEXISTED" = "1" ]; then
+  echo "[setup] Editing your existing .env — the values below are its current settings."
+else
+  echo "[setup] Created .env from .env.example — adjust anything you like below."
+fi
+echo "[setup] At any prompt: Enter keeps the current value; '-' clears it."
+
+main_menu
