@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -171,6 +172,10 @@ def _apply_system_override(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
         text = f"{SYSTEM_PROMPT}\n\n{original}" if original else SYSTEM_PROMPT
     elif SYSTEM_MODE == "suffix":
         text = f"{original}\n\n{SYSTEM_PROMPT}" if original else SYSTEM_PROMPT
+    elif SYSTEM_MODE == "prefix_env":# Custom prompt first, then ONLY the <env>...</env> block from the host.
+        env_match = re.search(r"<env>(.*?)</env>", original, re.DOTALL)
+        env_block = f"\n\n{env_match.group(0)}" if env_match else ""
+        text = SYSTEM_PROMPT + env_block if env_block else SYSTEM_PROMPT
     else:  # replace
         text = SYSTEM_PROMPT
     return [{"role": "system", "content": text}] + messages[n:]
