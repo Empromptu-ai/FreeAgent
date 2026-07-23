@@ -7,9 +7,16 @@ server and uses that same server for its own summary/label calls. Pick one of
 the two flows below. Both end with `./FreeAgent`, which is idempotent —
 re-run it any time.
 
+> **New to this? Run `./Setup_FreeAgent` first.** It's a friendly, interactive
+> configurator (no prior setup needed) that walks you through every setting in
+> `.env.example` with plain-language explanations, then creates or updates your
+> `.env` for you. Everything below still works by hand, but `Setup_FreeAgent`
+> saves you from editing the file directly. Any existing `.env` is backed up to
+> `.env.bak` before it's overwritten. `./Setup_FreeAgent --help` for details.
+
 ### A. Local Ollama (everything gets set up on this machine)
 
-Optional - add/change anything in .env.example, and/or copy it to .env (but the main script copies it automaticlaly and is set to the settings you'll probably want). Then:
+Optional - add/change anything in .env.example, and/or copy it to .env (but the main and setup scripts also handle this). Then:
 ```sh
 ./FreeAgent
 ```
