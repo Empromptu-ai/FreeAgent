@@ -596,6 +596,21 @@ if [ "${FA_LAUNCH_CLI:-0}" = "1" ]; then
   done
 
   echo "[free-agent] launching CLI in $CLI_DIR: $CLI_CMD  (quit it to stop the proxy)"
+  # Set the terminal window/tab title so our branding shows alongside the CLI's
+  # own banner for the whole session. opencode has no config for banner text, but
+  # the OSC 0 escape sets the title at the terminal level and survives the TUI's
+  # alternate-screen switch. Override the text with FA_TERM_TITLE; set it empty to
+  # skip. Only emitted to an interactive TTY so it never lands in logs/pipes.
+  #
+  # opencode itself rewrites the terminal title reactively (to "OpenCode" / the
+  # session name) once its TUI mounts, which would clobber ours after a fraction
+  # of a second. OPENCODE_DISABLE_TERMINAL_TITLE=1 turns those updates off so our
+  # title sticks; we only set it when we actually have a title to protect.
+  TERM_TITLE="${FA_TERM_TITLE-Empromptu FreeAgent - The Free, Optimized Coding Agent}"
+  if [ -n "$TERM_TITLE" ] && [ -t 1 ]; then
+    printf '\033]0;%s\007' "$TERM_TITLE"
+    export OPENCODE_DISABLE_TERMINAL_TITLE=1
+  fi
   # Open the CLI in the chosen project folder (a subshell, so our cwd stays the
   # repo root for the proxy). Don't let a non-zero CLI exit (e.g. Ctrl-C) abort
   # before the EXIT trap runs.
