@@ -287,7 +287,7 @@ class FileLedger:
             desc = e.description or "(no description yet)"
             lines.append(f"- {p} — {desc}  [r{e.reads}/w{e.writes}]")
         return Message(
-            role=Role.USER,
+            role=Role.ASSISTANT, # USER
             blocks=[TextBlock(text="\n".join(lines))],
             metadata={FA_KIND: KIND_FILE_LEDGER},
         )

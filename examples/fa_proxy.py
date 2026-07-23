@@ -124,7 +124,7 @@ STORAGE_ROOT = os.environ.get("FA_STORAGE_ROOT", "~/.free_agent")
 AUDIT_OUTBOUND = os.environ.get("FA_AUDIT_OUTBOUND") == "1"
 AUDIT_INBOUND = os.environ.get("FA_AUDIT_INBOUND") == "1"
 AUDIT_FULL = os.environ.get("FA_AUDIT_FULL") == "1"
-NUM_FULL_TEXT_TURNS = int(os.environ.get("FA_NUM_FULL_TEXT_TURNS", "2"))
+NUM_FULL_TEXT_TURNS = int(os.environ.get("FA_NUM_FULL_TEXT_TURNS", "1"))
 
 # --- System-prompt override -------------------------------------------------
 # Master switch: the override only applies when FA_SYSTEM_OVERRIDE=1, so you can
