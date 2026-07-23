@@ -43,7 +43,17 @@ Run:
     uvicorn examples.fa_proxy:app --port 49786
 
 Environment:
-    OLLAMA_BASE_URL   default http://localhost:11434
+    FA_PROVIDER       which upstream to forward to: ollama (default) or openai.
+                      Both speak the OpenAI chat-completions wire format, so the
+                      only differences are the base URL, the auth header and the
+                      reasoning-param flavor.
+    OLLAMA_BASE_URL   default http://localhost:11434 (used when FA_PROVIDER=ollama)
+    OPENAI_API_KEY    OpenAI bearer token (used when FA_PROVIDER=openai). Optional
+                      here but required by OpenAI itself; also honored by the
+                      summarizer backend.
+    OPENAI_BASE_URL   default https://api.openai.com/v1. Point this at any
+                      OpenAI-compatible endpoint (incl. Anthropic's /v1 compat
+                      endpoint) to reuse the openai provider path.
     FA_MODEL          default qwen3.6:35b   (used for summary/label + ledger,
                       and for the main agent loop unless FA_MAIN_MODEL is set)
     FA_MAIN_MODEL     default = FA_MODEL. The model the main agent loop runs on;
@@ -107,7 +117,39 @@ from free_agent.adapters import openai as oai
 from free_agent.llm.reasoning import normalize as _norm_reasoning
 from free_agent.llm.reasoning import params_for as _reasoning_params
 
+# --- Provider selection -----------------------------------------------------
+# Which upstream the proxy forwards to. Both providers speak the OpenAI Chat
+# Completions wire format the proxy already builds, so switching is just a
+# matter of base URL + auth header + reasoning-param flavor.
+#   FA_PROVIDER=ollama  (default) : local Ollama, no API key
+#   FA_PROVIDER=openai            : OpenAI (or any OpenAI-compatible endpoint via
+#                                   OPENAI_BASE_URL), authenticated with
+#                                   OPENAI_API_KEY.
+PROVIDER = os.environ.get("FA_PROVIDER", "ollama").strip().lower()
+
 OLLAMA = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+if PROVIDER not in ("ollama", "openai"):
+    raise ValueError(
+        f"FA_PROVIDER must be 'ollama' or 'openai', got {PROVIDER!r}"
+    )
+
+# Resolve the single upstream used by BOTH the main agent loop and the /v1/*
+# passthrough. ``UPSTREAM_V1`` already includes the trailing ``/v1`` so callers
+# just append ``/chat/completions`` etc. ``UPSTREAM_HEADERS`` carries auth (empty
+# for Ollama). ``REASONING_FLAVOR`` selects how FA_REASONING is translated into
+# the request body (see free_agent.llm.reasoning.params_for).
+if PROVIDER == "openai":
+    UPSTREAM_V1 = OPENAI_BASE_URL
+    UPSTREAM_HEADERS = {"Authorization": f"Bearer {OPENAI_API_KEY}"} if OPENAI_API_KEY else {}
+    REASONING_FLAVOR = "openai"
+else:  # ollama
+    UPSTREAM_V1 = f"{OLLAMA}/v1"
+    UPSTREAM_HEADERS = {}
+    REASONING_FLAVOR = "ollama-openai"
+
 MODEL = os.environ.get("FA_MODEL", "qwen3.6:35b")
 # The model the *main agent loop* runs on. Defaults to FA_MODEL so a single
 # FA_MODEL env var drives everything; set FA_MAIN_MODEL only if you want the
@@ -238,11 +280,27 @@ def _filter_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[s
     return [t for t in tools if _tool_name(t) not in TOOLS_DENY]
 
 
+# Backend used for the summary/label + file-ledger calls. Follows FA_PROVIDER
+# so the summarizer runs on the same provider as the agent loop. For openai this
+# uses free_agent's OpenAIBackend, which needs the openai package
+# (pip install "free_agent[openai]").
+if PROVIDER == "openai":
+    _SUMM_LLM = LLMConfig(
+        provider="openai",
+        base_url=OPENAI_BASE_URL,
+        api_key=OPENAI_API_KEY,
+        model=MODEL,
+        reasoning=SUMM_REASONING,
+    )
+else:
+    _SUMM_LLM = LLMConfig(
+        provider="ollama", base_url=OLLAMA, model=MODEL, reasoning=SUMM_REASONING
+    )
+
 CONFIG = Config(
     storage_root=STORAGE_ROOT,
-    # Backend used for the summary/label + file-ledger calls. Register the
-    # host's edit/read tool names so file detection recognizes them.
-    llm=LLMConfig(provider="ollama", base_url=OLLAMA, model=MODEL, reasoning=SUMM_REASONING),
+    # Register the host's edit/read tool names so file detection recognizes them.
+    llm=_SUMM_LLM,
     extra_read_tools={"read"},
     extra_write_tools={"edit", "write", "patch"},
     # Keep the most recent N completed turns as full text; older turns as
@@ -256,7 +314,14 @@ ca = FreeAgent(CONFIG)
 async def _lifespan(_app: FastAPI):
     # ── startup ──
     print("── free_agent proxy ─────────────────────────────", flush=True)
-    print(f"   ollama    : {OLLAMA}", flush=True)
+    print(f"   provider  : {PROVIDER}", flush=True)
+    print(f"   upstream  : {UPSTREAM_V1}", flush=True)
+    if PROVIDER == "openai" and not OPENAI_API_KEY:
+        print(
+            "   WARNING   : FA_PROVIDER=openai but OPENAI_API_KEY is unset — "
+            "requests will be sent unauthenticated and likely 401.",
+            flush=True,
+        )
     print(f"   main model: {MAIN_MODEL}  (agent loop)", flush=True)
     print(f"   summ model: {MODEL}  (summary/label + ledger)", flush=True)
     print(
@@ -450,7 +515,7 @@ async def _forward(
     chunks back only until the first real content token arrives, so a normal
     response streams with negligible added latency; an empty one is discarded
     and the retry is streamed in its place."""
-    url = f"{OLLAMA}/v1/chat/completions"
+    url = f"{UPSTREAM_V1}/chat/completions"
     do_continue = allow_continue and CONTINUE_ON_EMPTY
 
     if body.get("stream"):
@@ -461,8 +526,33 @@ async def _forward(
                 acc = _StreamAcc()
                 buffer: List[bytes] = []
                 flushed = False
-                async with httpx.AsyncClient(timeout=None) as client:
+                async with httpx.AsyncClient(timeout=None, headers=UPSTREAM_HEADERS) as client:
                     async with client.stream("POST", url, json=attempt_body) as r:
+                        # An error status is NOT a stream — the body is a JSON
+                        # error, not SSE. Feeding it to the accumulator finds no
+                        # content, which would look like an "empty" reply and
+                        # trigger pointless retries, ultimately surfacing to the
+                        # host as a blank turn. Instead surface the upstream error
+                        # verbatim (as a content chunk so it's visible in the host
+                        # UI) and stop.
+                        if r.status_code >= 400:
+                            err = (await r.aread()).decode("utf-8", "replace")
+                            print(f"[upstream error] {r.status_code}: {err[:800]}", flush=True)
+                            payload = {
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "role": "assistant",
+                                            "content": f"[proxy] upstream error {r.status_code}: {err}",
+                                        },
+                                        "finish_reason": "stop",
+                                    }
+                                ]
+                            }
+                            yield f"data: {json.dumps(payload)}\n\n".encode()
+                            yield b"data: [DONE]\n\n"
+                            return
                         async for chunk in r.aiter_raw():
                             acc.feed(chunk)
                             if flushed:
@@ -498,8 +588,11 @@ async def _forward(
 
     attempt_body = body
     for attempt in range(CONTINUE_MAX + 1):
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=None, headers=UPSTREAM_HEADERS) as client:
             r = await client.post(url, json=attempt_body)
+        if r.status_code >= 400:
+            print(f"[upstream error] {r.status_code}: {r.text[:800]}", flush=True)
+            return JSONResponse(r.json(), status_code=r.status_code)
         data = r.json()
         try:
             msg = data["choices"][0]["message"]
@@ -558,7 +651,7 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
     # Force the reasoning level too (if configured), so it's chosen here in one
     # place rather than by the host. Ollama's OpenAI-compatible /v1 endpoint
     # takes it as ``reasoning_effort``. Unset -> nothing added -> model default.
-    body.update(_reasoning_params("ollama-openai", AGENT_REASONING))
+    body.update(_reasoning_params(REASONING_FLAVOR, AGENT_REASONING))
 
     # Substitute our own system prompt for the host's (main agent loop only, so
     # aux title/summary prompts above are left intact). Tool definitions in
@@ -632,10 +725,10 @@ async def recall(request: Request):
 
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])
 async def passthrough(path: str, request: Request):
-    """Everything else (e.g. GET /v1/models) goes straight to Ollama."""
-    async with httpx.AsyncClient(timeout=None) as client:
+    """Everything else (e.g. GET /v1/models) goes straight to the upstream."""
+    async with httpx.AsyncClient(timeout=None, headers=UPSTREAM_HEADERS) as client:
         r = await client.request(
-            request.method, f"{OLLAMA}/v1/{path}", content=await request.body()
+            request.method, f"{UPSTREAM_V1}/{path}", content=await request.body()
         )
     return JSONResponse(r.json(), status_code=r.status_code)
 

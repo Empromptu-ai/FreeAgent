@@ -211,6 +211,12 @@ install_deps() {
   source "$VENV_DIR/bin/activate"
   pip install -q -e .
   pip install -q fastapi uvicorn httpx
+  # The openai provider's summarizer backend needs the openai SDK (the main
+  # agent loop forwards via httpx and doesn't, but the summarizer is built at
+  # proxy startup and would otherwise abort the launch).
+  if [ "${FA_PROVIDER:-ollama}" = "openai" ]; then
+    pip install -q openai
+  fi
 }
 
 ensure_env() {
@@ -522,11 +528,12 @@ echo "=========================================="
 
 ensure_system_pkgs  && echo "[ok] system"
 ensure_venv          && echo "[ok] venv"
-install_deps         && echo "[ok] deps installed"
 ensure_env "$FORCE"  && echo "[ok] .env"
-# Load .env NOW, before anything reads FA_MODEL — the model pull and the
-# opencode.json write both depend on it, so a model chosen in .env is honored.
+# Load .env NOW, before anything reads it — install_deps keys the openai SDK off
+# FA_PROVIDER, and the model pull + opencode.json write depend on FA_MODEL, so a
+# provider/model chosen in .env must be in scope before any of those run.
 load_env
+install_deps         && echo "[ok] deps installed"
 
 # Resolve the CLI's project folder up front — asking the user now, before the
 # unattended install/pull steps. Proxy sessions are keyed per OpenCode
@@ -541,7 +548,11 @@ fi
 # Skip the local-Ollama install/serve/pull dance when asked. FA_SKIP_OLLAMA is
 # the targeted switch (use it for a REMOTE Ollama: no local daemon, but pip
 # install still runs). FA_SKIP_INSTALL implies it too, for backward-compat.
-if [ "${FA_SKIP_OLLAMA:-0}" = "1" ] || [ "${FA_SKIP_INSTALL:-0}" = "1" ]; then
+# FA_PROVIDER=openai skips it too: there's no local model to serve or pull, and
+# FA_MODEL is an OpenAI model id (not an Ollama tag), so a pull would fail.
+if [ "${FA_PROVIDER:-ollama}" = "openai" ]; then
+  echo "[free-agent] skipping local Ollama setup (FA_PROVIDER=openai)"
+elif [ "${FA_SKIP_OLLAMA:-0}" = "1" ] || [ "${FA_SKIP_INSTALL:-0}" = "1" ]; then
   echo "[free-agent] skipping local Ollama setup (FA_SKIP_OLLAMA/FA_SKIP_INSTALL=1)"
 else
   ensure_ollama_installed "$(uname -s)" && echo "[ok] Ollama primed"
