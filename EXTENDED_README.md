@@ -13,14 +13,14 @@ It is **lossy in view, losslessly recoverable.**
 
 The proxy is an **Ollama device**: it forwards OpenCode's requests to an Ollama
 server and uses that same server for its own summary/label calls. Pick one of
-the two flows below. Both end with `./install_and_run`, which is idempotent —
+the two flows below. Both end with `./FreeAgent`, which is idempotent —
 re-run it any time.
 
 ## A. Local Ollama (everything gets set up on this machine)
 
 ```sh
-cp .env.example .env        # optional — install_and_run does this for you
-./install_and_run
+cp .env.example .env        # optional — FreeAgent does this for you
+./FreeAgent
 ```
 
 That single command will: create the venv, install the Python deps, install
@@ -48,7 +48,7 @@ cp .env.example .env
 #   OLLAMA_BASE_URL=http://<remote-host>:11434
 #   FA_SKIP_OLLAMA=1        # don't install/start a local Ollama
 #   FA_MODEL=qwen3.6:35b    # must already be pulled on the remote
-./install_and_run
+./FreeAgent
 ```
 
 `FA_SKIP_OLLAMA=1` skips the local Ollama install/serve/pull but still installs
@@ -62,7 +62,7 @@ the Python deps and everything else. The proxy still runs locally on
 ## Changing the port
 
 Set `FA_PROXY_PORT` (and/or `FA_PROXY_HOST`) in `.env` and re-run
-`./install_and_run`. The generated `opencode.json` and every existing
+`./FreeAgent`. The generated `opencode.json` and every existing
 `recall_turn.ts` are re-synced to the new address automatically — only the
 `/recall` URL is rewritten, the tool definition itself is left untouched.
 
@@ -76,7 +76,7 @@ Set `FA_PROXY_PORT` (and/or `FA_PROXY_HOST`) in `.env` and re-run
 ---
 
 ## Simple Quickstart:
-./install_and_run
+./FreeAgent
 
 ### Use the install script (Assumes you have an Ollama server locally):
 ./install_ca.sh
