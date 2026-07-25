@@ -272,13 +272,112 @@ section_menu() {
   done
 }
 
+# ---- quick setups (L / R) ----------------------------------------------------
+# Reset the in-memory config to .env.example's defaults. Reparses the template
+# from scratch and leaves SRC pointed at it, so a subsequent save re-emits the
+# pristine .env.example with only the overrides below applied.
+reset_to_example() {
+  [ -f "$EXAMPLE_FILE" ] || die "no .env.example to load defaults from — cannot run the standard setup."
+  KEYS=(); SECS=(); HELPS=(); DEFS=(); OPT=(); CUR=(); SET=(); SECTIONS_LIST=()
+  SRC="$EXAMPLE_FILE"
+  parse_config
+}
+
+set_key() {  # key value — force a value on and mark it to be written
+  local i
+  if i="$(idx_of "$1")"; then CUR[$i]="$2"; SET[$i]="1"; fi
+}
+
+# Best-effort total physical RAM in whole GB (integer, truncated). Prints the
+# number and returns 0 on success; prints nothing and returns 1 if it can't tell.
+# FA_RAM_GB_OVERRIDE short-circuits detection (used for testing the tiers).
+detect_ram_gb() {
+  if [ -n "${FA_RAM_GB_OVERRIDE:-}" ]; then printf '%s' "$FA_RAM_GB_OVERRIDE"; return 0; fi
+  local bytes kb
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+      if [ -n "$bytes" ] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        printf '%s' $(( bytes / 1024 / 1024 / 1024 )); return 0
+      fi
+      ;;
+    Linux)
+      kb="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+      if [ -n "$kb" ] && [[ "$kb" =~ ^[0-9]+$ ]]; then
+        printf '%s' $(( kb / 1024 / 1024 )); return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+# Suggested Ollama model for a given whole-GB RAM figure. Tiers:
+#   <8 -> 3b | 8-15 -> 8b | 16-31 -> 14b | 32-63 -> 35b | >=64 -> 70b
+suggest_model_for_ram() {  # gb
+  local gb="$1"
+  if   [ "$gb" -ge 90 ]; then echo "gpt-oss:120b"
+  elif [ "$gb" -ge 32 ]; then echo "qwen3.6:35b"
+  elif [ "$gb" -ge 24 ]; then echo "qwen3.5:27b"
+  elif [ "$gb" -ge 20  ]; then echo "gpt-oss:20b"
+  else                        echo "deepseek-coder-v2:16b"
+  fi
+}
+
+# L/R quick setups: load .env.example defaults, apply the server overrides, save.
+# 'local' hard-codes the localhost defaults; 'remote' asks for the URL and model
+# and keeps every other setting at its .env.example default.
+quick_setup() {
+  local mode="$1" url model
+  reset_to_example
+  if [ "$mode" = "remote" ]; then
+    echo
+    echo "==== Standard Remote server settings ===="
+    echo "Enter your remote Ollama server and model; everything else uses the defaults."
+    echo "(Press Enter to accept the example shown in brackets.)"
+    local url_default="http://192.168.1.50:11434" model_default="qwen3.6:35b"
+    printf '   > OLLAMA_BASE_URL [%s]: ' "$url_default"
+    IFS= read -r url || url=""
+    [ -z "$url" ] && url="$url_default"
+    printf '   > FA_MODEL [%s]: ' "$model_default"
+    IFS= read -r model || model=""
+    [ -z "$model" ] && model="$model_default"
+    set_key OLLAMA_BASE_URL "$url"
+    set_key FA_MODEL "$model"
+    echo
+    echo "[setup] Remote defaults loaded; OLLAMA_BASE_URL and FA_MODEL set."
+  else
+    echo
+    echo "==== Standard Local server settings ===="
+    local gb model_default
+    if gb="$(detect_ram_gb)"; then
+      model_default="$(suggest_model_for_ram "$gb")"
+      echo "Detected ~${gb} GB RAM — suggested model: ${model_default}"
+    else
+      model_default="qwen3.6:35b"
+      echo "Couldn't detect this machine's RAM — falling back to ${model_default}."
+    fi
+    echo "(Press Enter to accept the suggested model, or type a different one.)"
+    printf '   > FA_MODEL [%s]: ' "$model_default"
+    IFS= read -r model || model=""
+    [ -z "$model" ] && model="$model_default"
+    set_key OLLAMA_BASE_URL "http://localhost:11434"
+    set_key FA_MODEL "$model"
+    echo
+    echo "[setup] Standard local defaults loaded; FA_MODEL set to ${model}."
+  fi
+  save_and_exit
+}
+
 main_menu() {
   while true; do
     echo
     echo "============================================"
     echo "  FreeAgent .env setup"
     echo "============================================"
-    echo "Pick a section to edit, or walk through everything:"
+    echo "Pick a section to edit:"
+    echo
+    echo "   L) Standard Local server settings (do this if you just want the usual setup, sets all defaults)"
+    echo "   R) Standard Remote server settings (do this if you have a remote ollama server, set location and model, otherwise sets all defaults)"
     echo
     local n=1 s
     for s in "${SECTIONS_LIST[@]}"; do
@@ -286,12 +385,17 @@ main_menu() {
       n=$((n+1))
     done
     echo
-    echo "   a) Walk through every setting (guided)"
+    echo "   L) Standard Local server settings (do this if you just want the usual setup, sets all defaults)"
+    echo "   R) Standard Remote server settings (do this if you have a remote ollama server, set location and model, otherwise sets all defaults)"
+    echo
+    # echo "   a) Walk through every setting (guided)"   # hidden; 'a' still works below
     echo "   s) Save .env and exit"
     echo "   q) Quit without saving"
     printf '> '
     local ans; IFS= read -r ans || ans=q
     case "$ans" in
+      l|L) quick_setup local;  return 0 ;;
+      r|R) quick_setup remote; return 0 ;;
       a|A) walkthrough ;;
       s|S) save_and_exit; return 0 ;;
       q|Q) echo "[setup] No changes written."; return 0 ;;
