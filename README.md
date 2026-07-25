@@ -1,18 +1,20 @@
 # Empromptu FreeAgent - The free, local, entirely private agent coding system, by Empromptu!
 
-## Setup — exact steps
+## Setup — steps to take (TL:DR; run Setup_FreeAgent and then FreeAgent)
 
 The proxy is an **Ollama device**: it forwards OpenCode's requests to an Ollama
 server and uses that same server for its own summary/label calls. Pick one of
 the two flows below. Both end with `./FreeAgent`, which is idempotent —
 re-run it any time.
 
-> **New to this? Run `./Setup_FreeAgent` first.** It's a friendly, interactive
-> configurator (no prior setup needed) that walks you through every setting in
-> `.env.example` with plain-language explanations, then creates or updates your
-> `.env` for you. Everything below still works by hand, but `Setup_FreeAgent`
-> saves you from editing the file directly. Any existing `.env` is backed up to
-> `.env.bak` before it's overwritten. `./Setup_FreeAgent --help` for details.
+### First time setup -  
+Run `./Setup_FreeAgent` first.** It's a friendly, interactive
+configurator (no prior setup needed) that updates your
+`.env` for you. Chances are, you want a standard local install, or a remote install
+if you have an Ollama server somewhere else already.  If you're not sure, just double-click on
+Setup_Freeagent and hit L for "Local".  You'll get a suggested model size that should fit and 
+work on your computer (just hit enter to use it), or you can change it to any other model name in the Ollama format. 
+Everything in .env can also be changed by hand, but `Setup_FreeAgent` saves you from editing the file directly. `./Setup_FreeAgent --help` for details.
 
 ### A. Local Ollama (everything gets set up on this machine)
 
@@ -27,7 +29,9 @@ Ollama (if missing) and start it, pull the model in `FA_MODEL`, install
 OpenCode, write `~/.config/opencode/opencode.json`, place the `recall_turn`
 tool, and launch the proxy on `127.0.0.1:49786`.
 
-Then, in OpenCode, run `/models` and pick **"Ollama/ (via free_agent)" / your-model-name (via free_agent)**.
+This should launch a session of OpenCode that is set up to use the FreeAgent proxy (if it doesn't, try running FreeAgent again). You can also install the OpenCode widget in VSCode, and it should be automatically set up.  You can tell by the purple background!
+
+OpenCode should already be set up to use your model. If it isn't, then type `/models` and pick **"Ollama/ (via free_agent)" / your-model-name (via free_agent)**.
 
 ### B. Remote Ollama (model runs on another machine)
 
