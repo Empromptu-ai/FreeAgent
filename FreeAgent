@@ -326,7 +326,7 @@ ensure_ollama_installed() {
    if ollama list 2>/dev/null | grep -qF "$model"; then
      echo "[free-agent] model '$model' is already available — skipping pull"
    else
-     echo "[free-agent] pulling model: $model"
+     echo "[free-agent] pulling model: $model  [NOTE: This may take a while, depending on your network speed]"
      ollama pull "$model" || { warn "ollama pull failed for $model (may need network connectivity)"; }
    fi
 
