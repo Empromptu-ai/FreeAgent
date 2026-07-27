@@ -79,7 +79,7 @@ expand_tilde() { printf '%s' "${1/#\~/$HOME}"; }
 # FA_CLI_PICKER=none disables it entirely (straight to the text prompt).
 pick_dir_gui() {
   [ "${FA_CLI_PICKER:-auto}" = "none" ] && return 1
-  local path="" prompt="Choose the project folder for the CLI"
+  local path="" prompt="Choose the project folder (Where do you want to write or modify code?)"
   case "$(uname -s)" in
     Darwin*)
       command -v osascript &>/dev/null || return 1
@@ -333,8 +333,27 @@ ensure_ollama_installed() {
    return 0
 }
 
+# Resolve the opencode binary and print its absolute path (nothing if absent).
+# We can't rely on `command -v` alone: the opencode.ai installer drops the
+# binary in ~/.opencode/bin and only appends a PATH line to the user's shell
+# rc file. This script runs in a NON-interactive, non-login shell (shebang), so
+# those rc files aren't sourced — meaning ~/.opencode/bin is usually NOT on PATH
+# here even right after a successful install. Checking the known install dirs
+# too keeps detection and launch consistent, and stops us from reinstalling
+# opencode on every run.
+find_opencode() {
+  local p
+  p="$(command -v opencode 2>/dev/null || true)"
+  if [ -n "$p" ]; then printf '%s' "$p"; return 0; fi
+  local cand
+  for cand in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"; do
+    if [ -x "$cand" ]; then printf '%s' "$cand"; return 0; fi
+  done
+  return 1
+}
+
 ensure_opencode() {
-  if command -v opencode &>/dev/null; then
+  if find_opencode >/dev/null; then
     return 0
   fi
   echo "[free-agent] installing OpenCode ..."
@@ -541,8 +560,16 @@ fi
 # Skip the local-Ollama install/serve/pull dance when asked. FA_SKIP_OLLAMA is
 # the targeted switch (use it for a REMOTE Ollama: no local daemon, but pip
 # install still runs). FA_SKIP_INSTALL implies it too, for backward-compat.
-if [ "${FA_SKIP_OLLAMA:-0}" = "1" ] || [ "${FA_SKIP_INSTALL:-0}" = "1" ]; then
-  echo "[free-agent] skipping local Ollama setup (FA_SKIP_OLLAMA/FA_SKIP_INSTALL=1)"
+# Additionally, if OLLAMA_BASE_URL points to a non‑localhost endpoint, assume a remote server and skip installing locally.
+remote_ollama=false
+if [ -n "${OLLAMA_BASE_URL:-}" ]; then
+  case "$OLLAMA_BASE_URL" in
+    http://127.0.0.1:*|http://localhost:*|https://127.0.0.1:*|https://localhost:*) remote_ollama=false ;;
+    *) remote_ollama=true ;;
+  esac
+fi
+if [ "${FA_SKIP_OLLAMA:-0}" = "1" ] || [ "${FA_SKIP_INSTALL:-0}" = "1" ] || [ "$remote_ollama" = true ]; then
+  echo "[free-agent] skipping local Ollama setup (FA_SKIP_OLLAMA/FA_SKIP_INSTALL=1 or remote OLLAMA_BASE_URL)"
 else
   ensure_ollama_installed "$(uname -s)" && echo "[ok] Ollama primed"
 fi
@@ -566,7 +593,16 @@ if [ "${FA_LAUNCH_CLI:-0}" = "1" ]; then
   # Run the proxy in the background, wait until it's reachable, then hand this
   # same terminal to an interactive CLI session. Quitting the CLI tears the
   # proxy down (via the EXIT trap), so one terminal window = one full session.
-  CLI_CMD="${FA_CLI_CMD:-opencode}"
+  # OpenCode is a standalone binary (installed by ensure_opencode via the
+  # opencode.ai installer, typically into ~/.opencode/bin) — it is NOT in our
+  # Python venv, which only holds the proxy's deps. Resolve it the same way
+  # detection does (PATH, then the installer's default dirs).
+  LOCAL_OPENCODE="$(find_opencode || true)"
+  if [ -z "$LOCAL_OPENCODE" ]; then
+    warn "opencode binary not found after install — set FA_CLI_CMD or add ~/.opencode/bin to PATH."
+    exit 1
+  fi
+  CLI_CMD="${FA_CLI_CMD:-$LOCAL_OPENCODE}"
   CONNECT_HOST="$(proxy_connect_host)"
 
   # Redirect all proxy / uvicorn output to a log file so it doesn't overlay
