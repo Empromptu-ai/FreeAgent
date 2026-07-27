@@ -317,15 +317,14 @@ detect_ram_gb() {
 # Ollama tag; MODEL_MINGB[i] is its suggested RAM/VRAM in GB. This is the single
 # source of truth for both the RAM->model suggestion and the interactive list.
 MODEL_NAMES=(
-  "qwen2.5-coder:3b"
-  "qwen2.5-coder:7b"
-  "deepseek-coder-v2:16b"
+  "qwen3.5:2b"
+  "qwen3.5:9b"
   "gpt-oss:20b"
   "qwen3.5:27b"
   "qwen3.6:35b"
   "gpt-oss:120b"
 )
-MODEL_MINGB=( 4 8 16 20 24 32 90 )
+MODEL_MINGB=( 4 8 20 24 32 90 )
 
 # Index into the model catalog for a given whole-GB RAM figure: the largest
 # model whose suggested RAM/VRAM still fits. Prints a 0-based index (always
