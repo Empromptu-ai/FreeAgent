@@ -333,8 +333,27 @@ ensure_ollama_installed() {
    return 0
 }
 
+# Resolve the opencode binary and print its absolute path (nothing if absent).
+# We can't rely on `command -v` alone: the opencode.ai installer drops the
+# binary in ~/.opencode/bin and only appends a PATH line to the user's shell
+# rc file. This script runs in a NON-interactive, non-login shell (shebang), so
+# those rc files aren't sourced — meaning ~/.opencode/bin is usually NOT on PATH
+# here even right after a successful install. Checking the known install dirs
+# too keeps detection and launch consistent, and stops us from reinstalling
+# opencode on every run.
+find_opencode() {
+  local p
+  p="$(command -v opencode 2>/dev/null || true)"
+  if [ -n "$p" ]; then printf '%s' "$p"; return 0; fi
+  local cand
+  for cand in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"; do
+    if [ -x "$cand" ]; then printf '%s' "$cand"; return 0; fi
+  done
+  return 1
+}
+
 ensure_opencode() {
-  if command -v opencode &>/dev/null; then
+  if find_opencode >/dev/null; then
     return 0
   fi
   echo "[free-agent] installing OpenCode ..."
@@ -576,18 +595,11 @@ if [ "${FA_LAUNCH_CLI:-0}" = "1" ]; then
   # proxy down (via the EXIT trap), so one terminal window = one full session.
   # OpenCode is a standalone binary (installed by ensure_opencode via the
   # opencode.ai installer, typically into ~/.opencode/bin) — it is NOT in our
-  # Python venv, which only holds the proxy's deps. Resolve it from PATH.
-  LOCAL_OPENCODE="$(command -v opencode || true)"
+  # Python venv, which only holds the proxy's deps. Resolve it the same way
+  # detection does (PATH, then the installer's default dirs).
+  LOCAL_OPENCODE="$(find_opencode || true)"
   if [ -z "$LOCAL_OPENCODE" ]; then
-    # Fall back to the installer's default location in case it isn't on PATH
-    # in this shell (e.g. a fresh install that hasn't updated the current
-    # session's PATH yet).
-    for cand in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"; do
-      [ -x "$cand" ] && { LOCAL_OPENCODE="$cand"; break; }
-    done
-  fi
-  if [ -z "$LOCAL_OPENCODE" ]; then
-    warn "opencode binary not found on PATH after install — set FA_CLI_CMD or add ~/.opencode/bin to PATH."
+    warn "opencode binary not found after install — set FA_CLI_CMD or add ~/.opencode/bin to PATH."
     exit 1
   fi
   CLI_CMD="${FA_CLI_CMD:-$LOCAL_OPENCODE}"
