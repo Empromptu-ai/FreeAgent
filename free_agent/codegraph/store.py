@@ -49,6 +49,8 @@ DEFAULT_CONFIG = {
     "query_top_k": 5,             # concepts returned by query_codeconcept (§6)
     "match_jaccard": 0.5,         # concept identity-matching threshold (§notes)
     "languages": ["python", "typescript"],
+    "summarize_workers": 6,       # concurrent Ollama digest calls (FA_CODEGRAPH_WORKERS)
+    "skip_methods": False,        # summarize only classes + top-level functions
 }
 
 

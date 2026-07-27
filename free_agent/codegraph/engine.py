@@ -28,6 +28,7 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .discover import iter_source_files
 from .schemas import ConceptRecord, EntityRecord
 from .store import Store, file_hash
 
@@ -35,12 +36,6 @@ from .store import Store, file_hash
 _ENGINES: Dict[str, "Engine"] = {}
 _ACTIVE: Optional["Engine"] = None
 _LOCK = threading.Lock()
-
-_SRC_EXTS = {".py", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs"}
-_SKIP_DIRS = {
-    ".git", "node_modules", "venv", ".venv", "__pycache__", "dist", "build",
-    ".mypy_cache", ".pytest_cache", "site-packages",
-}
 
 
 def _resolve_env_config(store: Store) -> Dict[str, object]:
@@ -57,6 +52,13 @@ def _resolve_env_config(store: Store) -> Dict[str, object]:
     )
     if os.environ.get("FA_CODEGRAPH_RESOLUTION"):
         cfg["resolution"] = float(os.environ["FA_CODEGRAPH_RESOLUTION"])
+    if os.environ.get("FA_CODEGRAPH_WORKERS"):
+        try:
+            cfg["summarize_workers"] = max(1, int(os.environ["FA_CODEGRAPH_WORKERS"]))
+        except ValueError:
+            pass
+    if os.environ.get("FA_CODEGRAPH_SKIP_METHODS"):
+        cfg["skip_methods"] = os.environ["FA_CODEGRAPH_SKIP_METHODS"] == "1"
     return cfg
 
 
@@ -72,26 +74,19 @@ class Engine:
     def _current_hashes(self) -> Dict[str, Dict[str, object]]:
         root = Path(self.input_dir)
         out: Dict[str, Dict[str, object]] = {}
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [
-                d for d in dirnames
-                if d not in _SKIP_DIRS and not d.endswith(".egg-info")
-            ]
-            for fn in filenames:
-                p = Path(dirpath) / fn
-                if p.suffix not in _SRC_EXTS:
-                    continue
-                rel = os.path.relpath(p, root)
-                try:
-                    out[rel] = {"hash": file_hash(p), "mtime": p.stat().st_mtime}
-                except OSError:
-                    continue
+        for p in iter_source_files(root):
+            rel = os.path.relpath(p, root)
+            try:
+                out[rel] = {"hash": file_hash(p), "mtime": p.stat().st_mtime}
+            except OSError:
+                continue
         return out
 
     # ── LLM/embedding helpers ───────────────────────────────────────────
     def _summarizer(self, cfg):
         from .summarize import Summarizer
-        return Summarizer(model=cfg["llm_model"], base_url=cfg["ollama_url"])
+        return Summarizer(model=cfg["llm_model"], base_url=cfg["ollama_url"],
+                          max_workers=int(cfg.get("summarize_workers", 6)))
 
     def _embed(self, texts: List[str], cfg):
         from .embed import embed_texts
@@ -116,28 +111,48 @@ class Engine:
         for recs in per_file.values():
             for rec in recs:
                 entities[rec.node_id] = rec
+        _log(f"parsed {len(per_file)} files → {len(entities)} entities, "
+             f"{graph.number_of_edges()} edges")
 
         # Entity summaries + tags (expensive; concurrent).
+        _log(f"summarizing {len(entities)} entities via {cfg['llm_model']} …")
         self._summarize_entities(list(entities.values()), entities, cfg)
         # Entity embeddings.
+        _log(f"embedding {len(entities)} entities via {cfg['embedder_model']} …")
         embeddings = self._embed_entities(list(entities.values()), cfg)
 
         # Cluster + concept digests.
         concepts = self._recluster(
             graph, entities, embeddings, prev_concepts={}, cfg=cfg,
         )
+        _log(f"clustered into {len(concepts)} concepts")
         concept_emb = self._embed_concepts(concepts, cfg)
         embeddings.update(concept_emb)
 
         manifest = self._build_manifest(per_file)
         self._persist(graph, entities, concepts, embeddings, manifest)
+        _log(f"build complete — {len(concepts)} concepts, {len(entities)} entities")
 
     def _summarize_entities(self, recs: List[EntityRecord],
                             entities: Dict[str, EntityRecord], cfg) -> None:
+        if cfg.get("skip_methods"):
+            # Methods stay in the graph (structure + clustering) but skip the
+            # per-method LLM call; their embedding falls back to the signature.
+            skipped = sum(1 for r in recs if r.kind == "method")
+            recs = [r for r in recs if r.kind != "method"]
+            if skipped:
+                _log(f"skip_methods on — not summarizing {skipped} methods")
         if not recs:
             return
         items = [(r.node_id, r.file, self._entity_code(r)) for r in recs]
-        out = self._summarizer(cfg).entities(items)
+
+        def _progress(done, total):
+            # Log at every 10% (and the final one) so a big repo shows movement.
+            step = max(1, total // 10)
+            if done == total or done % step == 0:
+                _log(f"  summarized {done}/{total} entities")
+
+        out = self._summarizer(cfg).entities(items, on_progress=_progress)
         for node_id, res in out.items():
             if node_id in entities:
                 entities[node_id].tag = res.get("tag", "") or entities[node_id].tag
@@ -490,6 +505,11 @@ def status(input_dir: Optional[str] = None) -> Dict[str, object]:
 
 
 # ── free helpers ─────────────────────────────────────────────────────────────
+def _log(msg: str) -> None:
+    """Progress line. Goes to stdout, which the proxy redirects to proxy.log."""
+    print(f"[codegraph] {msg}", flush=True)
+
+
 def _default_storage_root() -> Path:
     return Path(os.path.expanduser(
         os.environ.get("FA_STORAGE_ROOT", "~/.free_agent")

@@ -18,14 +18,13 @@ Imported lazily so a missing watchdog dep never breaks the rest of codegraph.
 
 from __future__ import annotations
 
-import os
 import threading
 from pathlib import Path
 from typing import Dict, Optional
 
 from . import engine as _engine
+from .discover import is_tracked_file
 
-_SRC_EXTS = {".py", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs"}
 _DEBOUNCE_S = 2.0
 
 _observers: Dict[str, object] = {}
@@ -49,7 +48,7 @@ def start_watch(input_dir: str, debounce_s: float = _DEBOUNCE_S) -> bool:
             self._lock = threading.Lock()
 
         def _schedule(self, path: str):
-            if os.path.splitext(path)[1] not in _SRC_EXTS:
+            if not is_tracked_file(Path(path), Path(key)):
                 return
             with self._lock:
                 t = self._timers.get(path)

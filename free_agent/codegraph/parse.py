@@ -28,6 +28,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .discover import iter_source_files
 from .schemas import EntityRecord
 from .store import sha1_text
 
@@ -64,11 +65,6 @@ _CLASS_TYPES = {
     "class_definition", "class_declaration", "abstract_class_declaration",
 }
 _CALL_TYPES = {"call", "call_expression"}
-
-_SKIP_DIRS = {
-    ".git", "node_modules", "venv", ".venv", "__pycache__", "dist", "build",
-    ".mypy_cache", ".pytest_cache", ".egg-info", "site-packages",
-}
 
 
 class _Grammars:
@@ -119,19 +115,6 @@ class _Grammars:
             p.set_language(language)          # older API
         self._parsers[lang] = p
         return p
-
-
-def _iter_source_files(input_dir: Path, exts) -> List[Path]:
-    out: List[Path] = []
-    for dirpath, dirnames, filenames in os.walk(input_dir):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _SKIP_DIRS and not d.endswith(".egg-info")
-        ]
-        for fn in filenames:
-            if Path(fn).suffix in exts:
-                out.append(Path(dirpath) / fn)
-    return out
 
 
 def _node_name(node, src: bytes) -> Optional[str]:
@@ -205,8 +188,6 @@ def parse_dir(
     import networkx as nx
 
     root = Path(input_dir).expanduser().resolve()
-    exts = {e for e, l in _EXT_LANG.items() if _EXT_LANG.get(e) in languages
-            or l in languages}
     grammars = _Grammars(languages)
 
     graph = nx.MultiDiGraph()
@@ -220,7 +201,7 @@ def parse_dir(
     if only_files is not None:
         files = [Path(f) for f in only_files]
     else:
-        files = _iter_source_files(root, exts)
+        files = list(iter_source_files(root))
 
     parsed: List[Tuple[str, List[EntityRecord], List[Tuple[str, List[str], List[str]]]]] = []
 

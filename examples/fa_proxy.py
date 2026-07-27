@@ -93,10 +93,15 @@ Environment:
     FA_CODEGRAPH_LIVE set to 1 to rebuild the index incrementally on file
                       changes (watchdog). Off by default; the initial build runs
                       once the launcher POSTs the project root to /codegraph/init.
-    FA_CODEGRAPH_MODEL       digest LLM model (default = FA_MODEL).
+    FA_CODEGRAPH_MODEL       digest LLM model (default = FA_MODEL). A smaller,
+                             faster model here cuts build time substantially.
     FA_CODEGRAPH_EMBED_MODEL embedding model via /api/embed (default
                              nomic-embed-text).
     FA_CODEGRAPH_RESOLUTION  Leiden resolution / concept granularity (default 1.0).
+    FA_CODEGRAPH_WORKERS     concurrent digest calls to Ollama (default 6).
+    FA_CODEGRAPH_SKIP_METHODS  1 = summarize only classes + top-level functions.
+    FA_CODEGRAPH_EXCLUDE     extra comma-separated dir names to exclude.
+    FA_CODEGRAPH_MAX_FILE_KB  skip source files larger than this (default 512).
 """
 
 from __future__ import annotations

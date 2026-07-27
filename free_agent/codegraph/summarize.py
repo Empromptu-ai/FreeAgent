@@ -89,13 +89,16 @@ class Summarizer:
             return {}
         return _parse_json(raw)
 
-    def entities(self, items: List[Tuple[str, str, str]]) -> Dict[str, Dict[str, str]]:
+    def entities(self, items: List[Tuple[str, str, str]],
+                 on_progress=None) -> Dict[str, Dict[str, str]]:
         """items: [(node_id, file, code)]  ->  {node_id: {tag, summary}}.
 
         Runs the per-entity calls concurrently against Ollama (the expensive
-        full-build step, §3.2).
+        full-build step, §3.2). ``on_progress(done, total)`` is called after each
+        completion so callers can log movement on a slow, large repo.
         """
         results: Dict[str, Dict[str, str]] = {}
+        total = len(items)
 
         def work(item):
             node_id, file, code = item
@@ -103,8 +106,10 @@ class Summarizer:
             return node_id, self._one(_ENTITY_SYS, prompt)
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            for node_id, res in pool.map(work, items):
+            for done, (node_id, res) in enumerate(pool.map(work, items), 1):
                 results[node_id] = res
+                if on_progress is not None:
+                    on_progress(done, total)
         return results
 
     def concept(self, member_lines: List[str]) -> Dict[str, str]:
