@@ -574,8 +574,23 @@ if [ "${FA_LAUNCH_CLI:-0}" = "1" ]; then
   # Run the proxy in the background, wait until it's reachable, then hand this
   # same terminal to an interactive CLI session. Quitting the CLI tears the
   # proxy down (via the EXIT trap), so one terminal window = one full session.
-  LOCAL_OPENCODE="$VENV_DIR/bin/opencode"
-    CLI_CMD="${FA_CLI_CMD:-$LOCAL_OPENCODE}"
+  # OpenCode is a standalone binary (installed by ensure_opencode via the
+  # opencode.ai installer, typically into ~/.opencode/bin) — it is NOT in our
+  # Python venv, which only holds the proxy's deps. Resolve it from PATH.
+  LOCAL_OPENCODE="$(command -v opencode || true)"
+  if [ -z "$LOCAL_OPENCODE" ]; then
+    # Fall back to the installer's default location in case it isn't on PATH
+    # in this shell (e.g. a fresh install that hasn't updated the current
+    # session's PATH yet).
+    for cand in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"; do
+      [ -x "$cand" ] && { LOCAL_OPENCODE="$cand"; break; }
+    done
+  fi
+  if [ -z "$LOCAL_OPENCODE" ]; then
+    warn "opencode binary not found on PATH after install — set FA_CLI_CMD or add ~/.opencode/bin to PATH."
+    exit 1
+  fi
+  CLI_CMD="${FA_CLI_CMD:-$LOCAL_OPENCODE}"
   CONNECT_HOST="$(proxy_connect_host)"
 
   # Redirect all proxy / uvicorn output to a log file so it doesn't overlay
