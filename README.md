@@ -22,8 +22,8 @@ brew install ollama
 #### Then run ollama serve (if not auto-started) and ollama run llama3 (or any model) to start using it.
 
 
-### Run `./Setup_FreeAgent` to put in whether you want a local or remote server. It's a friendly, interactive
-configurator (no prior setup needed) that updates your
+### Run `./Setup_FreeAgent` to put in whether you want a local or remote server. 
+It's a friendly, interactive configurator (no prior setup needed) that updates your
 `.env` for you. Chances are, you want a standard local install, or a remote install
 if you have an Ollama server somewhere else already.  If you're not sure, just double-click on
 Setup_Freeagent and hit L for "Local".  You'll get a suggested model size that should fit and 
