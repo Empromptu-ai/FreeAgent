@@ -42,7 +42,7 @@ class OllamaBackend:
         self.timeout = timeout
         self.reasoning = reasoning
 
-    def complete(self, system: str, prompt: str) -> str:
+    def complete(self, system: str, prompt: str, *, format: Optional[str] = None) -> str:
         url = f"{self.base_url}/api/chat"
         body = {
             "model": self.model,
@@ -53,6 +53,10 @@ class OllamaBackend:
                 {"role": "user", "content": prompt},
             ],
         }
+        # Constrained decoding: Ollama's /api/chat takes a top-level ``format``
+        # ("json" or a JSON schema). Used by codegraph's tag/summary extraction.
+        if format:
+            body["format"] = format
         # Native /api/chat carries reasoning as a top-level ``think`` field.
         body.update(params_for("ollama", self.reasoning))
         data = json.dumps(body).encode("utf-8")

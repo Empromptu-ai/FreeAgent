@@ -16,6 +16,19 @@ dependencies = []
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
 dev = ["pytest>=7.0"]
+# Graph-RAG code-concept system (fa_proxy). igraph/leidenalg pull a C build
+# toolchain; the proxy imports free_agent.codegraph lazily so a missing extra
+# degrades to "codegraph disabled" rather than crashing.
+codegraph = [
+  "tree-sitter>=0.21",
+  "tree-sitter-python>=0.21",
+  "tree-sitter-typescript>=0.21",
+  "networkx>=3.0",
+  "numpy>=1.23",
+  "python-igraph>=0.11",
+  "leidenalg>=0.10",
+  "watchdog>=3.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["free_agent*"]
