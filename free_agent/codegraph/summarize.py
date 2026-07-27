@@ -69,12 +69,15 @@ def _parse_json(text: str) -> Dict[str, str]:
 
 class Summarizer:
     def __init__(self, model: str, base_url: str, temperature: float = 0.15,
-                 max_workers: int = 6, timeout: float = 120.0):
+                 max_workers: int = 6, timeout: float = 120.0, before_call=None):
         self.model = model
         self.base_url = base_url
         self.temperature = temperature
         self.max_workers = max_workers
         self.timeout = timeout
+        # Optional gate called before every LLM request (e.g. the activity gate
+        # that pauses the build while the agent is using the GPU).
+        self.before_call = before_call
 
     def _backend(self) -> OllamaBackend:
         return OllamaBackend(
@@ -83,22 +86,35 @@ class Summarizer:
         )
 
     def _one(self, system: str, prompt: str) -> Dict[str, str]:
+        if self.before_call is not None:
+            try:
+                self.before_call()          # block until the agent is idle
+            except Exception:
+                pass
         try:
             raw = self._backend().complete(system, prompt, format="json")
-        except Exception:
-            return {}
+        except Exception as e:
+            # Surface the reason (timeout, connection refused, model missing) as a
+            # sentinel so the caller can count/log it. A busy Ollama times these
+            # out; silently returning {} would leave the whole index empty with no
+            # explanation, which is exactly the "spins up but nothing happens"
+            # symptom. The entity still gets an empty tag/summary downstream.
+            return {"tag": "", "summary": "", "_error": f"{type(e).__name__}: {e}"}
         return _parse_json(raw)
 
     def entities(self, items: List[Tuple[str, str, str]],
-                 on_progress=None) -> Dict[str, Dict[str, str]]:
+                 on_progress=None, on_result=None) -> Dict[str, Dict[str, str]]:
         """items: [(node_id, file, code)]  ->  {node_id: {tag, summary}}.
 
         Runs the per-entity calls concurrently against Ollama (the expensive
-        full-build step, §3.2). ``on_progress(done, total)`` is called after each
-        completion so callers can log movement on a slow, large repo.
+        full-build step, §3.2). ``on_progress(done, total, failures)`` is called
+        after each completion for logging; ``on_result(node_id, res)`` is called
+        with each result as it lands so callers can checkpoint to disk (results
+        are yielded in the calling thread, so on_result need not be thread-safe).
         """
         results: Dict[str, Dict[str, str]] = {}
         total = len(items)
+        failures = 0
 
         def work(item):
             node_id, file, code = item
@@ -108,8 +124,12 @@ class Summarizer:
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             for done, (node_id, res) in enumerate(pool.map(work, items), 1):
                 results[node_id] = res
+                if res.get("_error"):
+                    failures += 1
+                if on_result is not None:
+                    on_result(node_id, res)
                 if on_progress is not None:
-                    on_progress(done, total)
+                    on_progress(done, total, failures)
         return results
 
     def concept(self, member_lines: List[str]) -> Dict[str, str]:

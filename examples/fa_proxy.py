@@ -99,6 +99,10 @@ Environment:
                              nomic-embed-text).
     FA_CODEGRAPH_RESOLUTION  Leiden resolution / concept granularity (default 1.0).
     FA_CODEGRAPH_WORKERS     concurrent digest calls to Ollama (default 6).
+    FA_CODEGRAPH_TIMEOUT     per digest call timeout, seconds (default 300).
+    FA_CODEGRAPH_IDLE        1 (default) = pause the background build's GPU calls
+                             while the agent is mid-turn; 0 = build flat-out.
+    FA_CODEGRAPH_QUIET_SECONDS  agent-silence before the build resumes (default 5).
     FA_CODEGRAPH_SKIP_METHODS  1 = summarize only classes + top-level functions.
     FA_CODEGRAPH_EXCLUDE     extra comma-separated dir names to exclude.
     FA_CODEGRAPH_MAX_FILE_KB  skip source files larger than this (default 512).
@@ -320,7 +324,9 @@ async def _lifespan(_app: FastAPI):
         print("   codegraph : off (FA_CODEGRAPH_TOOL=0)", flush=True)
     elif CODEGRAPH_OK:
         live = " + live watch" if CODEGRAPH_LIVE else ""
-        print(f"   codegraph : on{live} (awaiting POST /codegraph/init)", flush=True)
+        idle = "idle-aware" if os.environ.get("FA_CODEGRAPH_IDLE", "1") == "1" else "flat-out"
+        print(f"   codegraph : on{live}, {idle} build (awaiting POST /codegraph/init)",
+              flush=True)
     else:
         miss = ", ".join(_cg.missing_deps()) if _cg is not None else "import failed"
         print(f"   codegraph : unavailable — install .[codegraph] ({miss})", flush=True)
@@ -581,6 +587,12 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
     # rather than in the host's config; the host's model id is just a label.
     body["model"] = MAIN_MODEL
 
+    # Tell the codegraph build the agent is active, so its background index build
+    # pauses instead of fighting this request for the GPU. Marked again at the
+    # response's completion (below) so a long streaming turn stays "active".
+    if CODEGRAPH_OK and _cg is not None:
+        _cg.note_activity()
+
     # Drop/keep tools per FA_TOOLS_ALLOW / FA_TOOLS_DENY (default: deny "glob").
     tools_in = body.get("tools") or []
     kept = _filter_tools(tools_in) or []
@@ -676,10 +688,14 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
         _dump_outbound(x_session_id, turn_no, body["messages"])
 
     # Capture the main model's response(s) for this turn (streamed or not) — for
-    # the from-model file and/or the complete interleaved transcript.
+    # the from-model file and/or the complete interleaved transcript, and to
+    # re-mark agent activity at completion so a long streaming turn keeps the
+    # codegraph build paused for its whole duration (not just its first token).
     capture = None
-    if AUDIT_INBOUND or AUDIT_FULL:
+    if AUDIT_INBOUND or AUDIT_FULL or CODEGRAPH_OK:
         def capture(msg, _sid=x_session_id, _tn=turn_no, _live=live):
+            if CODEGRAPH_OK and _cg is not None:
+                _cg.note_activity()
             if AUDIT_INBOUND:
                 _capture_response(_sid, _tn, msg)
             if AUDIT_FULL:

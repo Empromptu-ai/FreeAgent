@@ -52,6 +52,25 @@ def embed_texts(texts: List[str], model: str, base_url: str, timeout: float = 12
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:  # pragma: no cover - network
+            # Ollama returns 404 with {"error": "model X not found, try pulling
+            # it first"} when the embed model isn't present. Surface that as an
+            # actionable message instead of a bare "HTTP Error 404: Not Found" —
+            # this is the single most common codegraph setup failure.
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+            if e.code == 404 and "not found" in detail.lower():
+                raise EmbedError(
+                    f"embedding model {model!r} is not pulled — run "
+                    f"`ollama pull {model}` (or set FA_CODEGRAPH_EMBED_MODEL to a "
+                    f"model you have). Ollama said: {detail.strip()}"
+                ) from e
+            raise EmbedError(
+                f"ollama embed request failed (HTTP {e.code}): {detail.strip() or e}"
+            ) from e
         except urllib.error.URLError as e:  # pragma: no cover - network
             raise EmbedError(f"ollama embed request failed: {e}") from e
         embs = payload.get("embeddings")

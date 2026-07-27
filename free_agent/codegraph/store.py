@@ -50,6 +50,9 @@ DEFAULT_CONFIG = {
     "match_jaccard": 0.5,         # concept identity-matching threshold (§notes)
     "languages": ["python", "typescript"],
     "summarize_workers": 6,       # concurrent Ollama digest calls (FA_CODEGRAPH_WORKERS)
+    "summarize_timeout": 300,     # per-call timeout, seconds (FA_CODEGRAPH_TIMEOUT).
+                                  # Runs in the background, so a generous cap beats
+                                  # returning empty summaries under a busy Ollama.
     "skip_methods": False,        # summarize only classes + top-level functions
 }
 
@@ -108,7 +111,7 @@ class Store:
 
     def save_config(self, cfg: Dict[str, Any]) -> None:
         self.ensure_dir()
-        self.config_path.write_text(json.dumps(cfg, indent=2))
+        _atomic_write_text(self.config_path, json.dumps(cfg, indent=2))
 
     # ---- manifest --------------------------------------------------------
     def load_manifest(self) -> Dict[str, Any]:
@@ -118,7 +121,7 @@ class Store:
 
     def save_manifest(self, manifest: Dict[str, Any]) -> None:
         self.ensure_dir()
-        self.manifest_path.write_text(json.dumps(manifest, indent=2))
+        _atomic_write_text(self.manifest_path, json.dumps(manifest, indent=2))
 
     # ---- entities --------------------------------------------------------
     def load_entities(self) -> Dict[str, EntityRecord]:
@@ -130,7 +133,7 @@ class Store:
     def save_entities(self, entities: Dict[str, EntityRecord]) -> None:
         self.ensure_dir()
         raw = {k: v.to_dict() for k, v in entities.items()}
-        self.entities_path.write_text(json.dumps(raw, indent=2))
+        _atomic_write_text(self.entities_path, json.dumps(raw, indent=2))
 
     # ---- concepts --------------------------------------------------------
     def load_concepts(self) -> Dict[str, ConceptRecord]:
@@ -142,7 +145,7 @@ class Store:
     def save_concepts(self, concepts: Dict[str, ConceptRecord]) -> None:
         self.ensure_dir()
         raw = {k: v.to_dict() for k, v in concepts.items()}
-        self.concepts_path.write_text(json.dumps(raw, indent=2))
+        _atomic_write_text(self.concepts_path, json.dumps(raw, indent=2))
 
     # ---- graph -----------------------------------------------------------
     def load_graph(self):
@@ -155,8 +158,10 @@ class Store:
 
     def save_graph(self, graph) -> None:
         self.ensure_dir()
-        with open(self.graph_path, "wb") as fh:
+        tmp = self.graph_path.with_name(self.graph_path.name + ".tmp")
+        with open(tmp, "wb") as fh:
             pickle.dump(graph, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, self.graph_path)
 
     # ---- embeddings ------------------------------------------------------
     def load_embeddings(self) -> Dict[str, Any]:
@@ -174,7 +179,19 @@ class Store:
         # npz keys can't contain some characters cleanly, but node_ids (paths +
         # "::") are fine for np.savez. Force float32 to keep the file small.
         clean = {k: np.asarray(v, dtype="float32") for k, v in vectors.items()}
-        np.savez(self.embeddings_path, **clean)
+        # Temp name must end in .npz or np.savez appends it, breaking the rename.
+        tmp = self.embeddings_path.with_name(self.embeddings_path.name + ".tmp.npz")
+        np.savez(tmp, **clean)
+        os.replace(tmp, self.embeddings_path)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (temp file + rename) so a concurrent
+    reader — e.g. a /codegraph/status poll during a checkpoint flush — never sees
+    a truncated half-written file, and a crash mid-write can't corrupt the store."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 def sha1_text(text: str) -> str:

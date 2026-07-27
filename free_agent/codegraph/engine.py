@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -36,6 +37,70 @@ from .store import Store, file_hash
 _ENGINES: Dict[str, "Engine"] = {}
 _ACTIVE: Optional["Engine"] = None
 _LOCK = threading.Lock()
+
+
+# ── activity gate: keep the background build off the GPU while the agent runs ─
+class ActivityGate:
+    """Coordinates the background index build with the live agent so they don't
+    fight over one GPU.
+
+    The proxy calls ``mark()`` on every main-agent request (start and
+    completion). Before each GPU-bound call (LLM digest / embedding), the build
+    calls ``wait_until_quiet()``, which blocks until the agent has been silent
+    for ``quiet_seconds``. Parsing is CPU-only and never gated, so the graph is
+    built immediately; only the expensive model calls wait for idle windows.
+
+    Disabled (FA_CODEGRAPH_IDLE=0) → ``wait_until_quiet`` is a no-op and the
+    build runs flat out, competing with the agent (the old behavior).
+    """
+
+    def __init__(self):
+        self.enabled = os.environ.get("FA_CODEGRAPH_IDLE", "1") == "1"
+        try:
+            self.quiet_seconds = max(0.0, float(
+                os.environ.get("FA_CODEGRAPH_QUIET_SECONDS", "5")))
+        except ValueError:
+            self.quiet_seconds = 5.0
+        self.poll = 0.5
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+        self._paused = False
+
+    def mark(self) -> None:
+        """Record agent activity 'now' (cheap; safe from any thread)."""
+        self._last = time.monotonic()
+
+    def wait_until_quiet(self, should_stop=None) -> None:
+        """Block until the agent has been idle for ``quiet_seconds``. Logs the
+        pause/resume transition once (not once per worker). ``should_stop`` is an
+        optional callable; if it returns True the wait bails out early."""
+        if not self.enabled or self.quiet_seconds <= 0:
+            return
+        while True:
+            if should_stop is not None and should_stop():
+                return
+            idle_for = time.monotonic() - self._last
+            if idle_for >= self.quiet_seconds:
+                with self._lock:
+                    if self._paused:
+                        self._paused = False
+                        _log("agent idle — resuming index build")
+                return
+            with self._lock:
+                if not self._paused:
+                    self._paused = True
+                    _log(f"agent active — pausing index build until "
+                         f"{self.quiet_seconds:.0f}s quiet")
+            time.sleep(self.poll)
+
+
+_GATE = ActivityGate()
+
+
+def note_activity() -> None:
+    """Called by the proxy on each main-agent request; keeps the build off the
+    GPU while the agent is working. No-op-safe if idle mode is disabled."""
+    _GATE.mark()
 
 
 def _resolve_env_config(store: Store) -> Dict[str, object]:
@@ -59,6 +124,11 @@ def _resolve_env_config(store: Store) -> Dict[str, object]:
             pass
     if os.environ.get("FA_CODEGRAPH_SKIP_METHODS"):
         cfg["skip_methods"] = os.environ["FA_CODEGRAPH_SKIP_METHODS"] == "1"
+    if os.environ.get("FA_CODEGRAPH_TIMEOUT"):
+        try:
+            cfg["summarize_timeout"] = max(10, int(os.environ["FA_CODEGRAPH_TIMEOUT"]))
+        except ValueError:
+            pass
     return cfg
 
 
@@ -69,6 +139,14 @@ class Engine:
         self.status = "idle"           # idle | building | ready | error
         self.error: Optional[str] = None
         self._build_lock = threading.Lock()
+        # Live progress for /codegraph/status. phase: parsing|summarizing|
+        # embedding|clustering|done. done/total track the summarize pass.
+        self.phase = "idle"
+        self._prog = {"done": 0, "total": 0, "failed": 0}
+
+    def _set_phase(self, phase: str, done: int = 0, total: int = 0) -> None:
+        self.phase = phase
+        self._prog = {"done": done, "total": total, "failed": 0}
 
     # ── file discovery / hashing ────────────────────────────────────────
     def _current_hashes(self) -> Dict[str, Dict[str, object]]:
@@ -86,7 +164,9 @@ class Engine:
     def _summarizer(self, cfg):
         from .summarize import Summarizer
         return Summarizer(model=cfg["llm_model"], base_url=cfg["ollama_url"],
-                          max_workers=int(cfg.get("summarize_workers", 6)))
+                          max_workers=int(cfg.get("summarize_workers", 6)),
+                          timeout=float(cfg.get("summarize_timeout", 300)),
+                          before_call=_GATE.wait_until_quiet)
 
     def _embed(self, texts: List[str], cfg):
         from .embed import embed_texts
@@ -106,6 +186,7 @@ class Engine:
         cfg = _resolve_env_config(self.store)
         self.store.save_config(cfg)
 
+        self._set_phase("parsing")
         graph, per_file = parse_dir(self.input_dir, cfg["languages"])
         entities: Dict[str, EntityRecord] = {}
         for recs in per_file.values():
@@ -118,10 +199,12 @@ class Engine:
         _log(f"summarizing {len(entities)} entities via {cfg['llm_model']} …")
         self._summarize_entities(list(entities.values()), entities, cfg)
         # Entity embeddings.
+        self._set_phase("embedding")
         _log(f"embedding {len(entities)} entities via {cfg['embedder_model']} …")
         embeddings = self._embed_entities(list(entities.values()), cfg)
 
         # Cluster + concept digests.
+        self._set_phase("clustering")
         concepts = self._recluster(
             graph, entities, embeddings, prev_concepts={}, cfg=cfg,
         )
@@ -131,6 +214,7 @@ class Engine:
 
         manifest = self._build_manifest(per_file)
         self._persist(graph, entities, concepts, embeddings, manifest)
+        self._set_phase("done")
         _log(f"build complete — {len(concepts)} concepts, {len(entities)} entities")
 
     def _summarize_entities(self, recs: List[EntityRecord],
@@ -144,23 +228,76 @@ class Engine:
                 _log(f"skip_methods on — not summarizing {skipped} methods")
         if not recs:
             return
-        items = [(r.node_id, r.file, self._entity_code(r)) for r in recs]
 
-        def _progress(done, total):
-            # Log at every 10% (and the final one) so a big repo shows movement.
+        # Resume from a checkpoint: reuse summaries from a prior (possibly
+        # interrupted) run for any entity whose code is byte-identical. This is
+        # what makes a killed/restarted build cheap — the expensive LLM calls are
+        # never redone for unchanged code.
+        prior = self.store.load_entities()
+        reused = 0
+        todo: List[EntityRecord] = []
+        for r in recs:
+            p = prior.get(r.node_id)
+            if p and p.code_hash == r.code_hash and p.summary:
+                entities[r.node_id].tag = p.tag
+                entities[r.node_id].summary = p.summary
+                reused += 1
+            else:
+                todo.append(r)
+        grand_total = reused + len(todo)
+        self._set_phase("summarizing", done=reused, total=grand_total)
+        if reused:
+            _log(f"resuming from checkpoint — reused {reused} cached summaries, "
+                 f"{len(todo)} still to do")
+        if not todo:
+            self.store.save_entities(entities)
+            return
+
+        items = [(r.node_id, r.file, self._entity_code(r)) for r in todo]
+        first_error = {"msg": None}
+        counters = {"n": 0}
+
+        def _progress(done, total, failures):
+            # Feed the live status readout (reused ones already count as done).
+            self._prog = {"done": reused + done, "total": grand_total,
+                          "failed": failures}
+            # Log at every 10% (and the final one) so a big repo shows movement,
+            # and include the running failure count so a starved/overloaded Ollama
+            # is visible immediately rather than looking like a silent hang.
             step = max(1, total // 10)
             if done == total or done % step == 0:
-                _log(f"  summarized {done}/{total} entities")
+                tail = f" ({failures} failed/timed out)" if failures else ""
+                _log(f"  summarized {reused + done}/{grand_total} entities{tail}")
 
-        out = self._summarizer(cfg).entities(items, on_progress=_progress)
-        for node_id, res in out.items():
+        def _on_result(node_id, res):
             if node_id in entities:
                 entities[node_id].tag = res.get("tag", "") or entities[node_id].tag
                 entities[node_id].summary = res.get("summary", "")
+            if res.get("_error"):
+                if first_error["msg"] is None:
+                    first_error["msg"] = res["_error"]
+            # Checkpoint to disk periodically so a build killed mid-pass (e.g. the
+            # session is quit) keeps its progress for the next run to resume from.
+            counters["n"] += 1
+            if counters["n"] % 15 == 0:
+                try:
+                    self.store.save_entities(entities)
+                except Exception:
+                    pass
+
+        out = self._summarizer(cfg).entities(
+            items, on_progress=_progress, on_result=_on_result)
+        self.store.save_entities(entities)  # final checkpoint flush
+        n_err = sum(1 for r in out.values() if r.get("_error"))
+        if n_err:
+            _log(f"WARNING: {n_err}/{len(out)} entity digests failed "
+                 f"(first: {first_error['msg']}). The index will build but with "
+                 f"sparse summaries — see FA_CODEGRAPH_* tuning if Ollama is busy.")
 
     def _embed_entities(self, recs: List[EntityRecord], cfg) -> Dict[str, object]:
         if not recs:
             return {}
+        _GATE.wait_until_quiet()  # embeddings hit the GPU too — yield to the agent
         texts = [self._embed_text_for(r) for r in recs]
         mat = self._embed(texts, cfg)
         return {r.node_id: mat[i] for i, r in enumerate(recs)}
@@ -170,6 +307,7 @@ class Engine:
         recs = [c for c in concepts.values() if c.summary or c.tag]
         if not recs:
             return {}
+        _GATE.wait_until_quiet()  # embeddings hit the GPU too — yield to the agent
         texts = [f"{c.tag}: {c.summary}".strip() for c in recs]
         mat = self._embed(texts, cfg)
         return {c.concept_id: mat[i] for i, c in enumerate(recs)}
@@ -308,6 +446,7 @@ class Engine:
                     if cid not in embeddings or cid not in prev_concepts}
         recs = [concepts[c] for c in need_emb if concepts[c].summary or concepts[c].tag]
         if recs:
+            _GATE.wait_until_quiet()
             texts = [f"{c.tag}: {c.summary}".strip() for c in recs]
             mat = self._embed(texts, cfg)
             for i, c in enumerate(recs):
@@ -418,6 +557,53 @@ class Engine:
                 )
         return "\n".join(out).strip()
 
+    # ── progress reporting (/codegraph/status) ───────────────────────────
+    def progress_report(self) -> Dict[str, object]:
+        """A human-readable snapshot for /codegraph/status. Combines the live,
+        in-process phase/counts with what's actually persisted on disk, so it's
+        informative whether the build is running, finished, or was inspected from
+        a different process."""
+        rep: Dict[str, object] = {
+            "status": self.status,
+            "phase": self.phase,
+            "dir": self.input_dir,
+            "error": self.error,
+        }
+        done, total = self._prog.get("done", 0), self._prog.get("total", 0)
+        failed = self._prog.get("failed", 0)
+        if total:
+            pct = int(100 * done / total)
+            rep["summarized"] = f"{done}/{total}"
+            rep["percent"] = pct
+            if failed:
+                rep["failed"] = failed
+        # On-disk truth (defensive: reads may race a checkpoint, so tolerate it).
+        try:
+            ents = self.store.load_entities()
+            with_summary = sum(1 for e in ents.values() if e.summary)
+            rep["entities_on_disk"] = len(ents)
+            rep["entities_summarized_on_disk"] = with_summary
+        except Exception:
+            pass
+        try:
+            rep["concepts_on_disk"] = len(self.store.load_concepts())
+        except Exception:
+            pass
+        rep["complete"] = self.store.exists()
+        # A one-line summary that's pleasant to read straight from curl.
+        if self.status == "ready" and rep.get("complete"):
+            rep["message"] = (
+                f"index ready: {rep.get('concepts_on_disk', '?')} concepts, "
+                f"{rep.get('entities_on_disk', '?')} entities")
+        elif self.phase == "summarizing" and total:
+            extra = f", {failed} failed/timed out" if failed else ""
+            rep["message"] = f"summarizing {done}/{total} ({rep.get('percent')}%){extra}"
+        elif self.status == "building":
+            rep["message"] = f"building ({self.phase}) …"
+        elif self.status == "error":
+            rep["message"] = f"error: {self.error}"
+        return rep
+
 
 # ── module functions matching §6 signatures ─────────────────────────────────
 def _get_engine(input_dir: Optional[str] = None) -> Optional[Engine]:
@@ -440,6 +626,11 @@ def init_or_sync(input_dir: str, storage_root: Optional[Path] = None) -> None:
         engine = _ENGINES.get(key) or Engine(input_dir, storage_root)
         _ENGINES[key] = engine
         _ACTIVE = engine
+        # A build for this dir is already running in this process — don't kick off
+        # a second one that would fight it (e.g. a duplicate /codegraph/init).
+        if engine.status == "building":
+            _log("build already in progress — ignoring duplicate init")
+            return
     with engine._build_lock:
         engine.status = "building"
         engine.error = None
@@ -500,8 +691,8 @@ def query_codeconcept(query_text: str, input_dir: Optional[str] = None) -> str:
 def status(input_dir: Optional[str] = None) -> Dict[str, object]:
     engine = _get_engine(input_dir)
     if engine is None:
-        return {"status": "disabled"}
-    return {"status": engine.status, "error": engine.error, "dir": engine.input_dir}
+        return {"status": "disabled", "message": "no index build has been requested"}
+    return engine.progress_report()
 
 
 # ── free helpers ─────────────────────────────────────────────────────────────

@@ -7,7 +7,8 @@
 #   1. venv creation (if absent)
 #   2. pip install library + proxy deps (unless FA_SKIP_INSTALL=1)
 #   3. .env from .env.example (skipped if .env already exists, unless --force)
-#   4. ollama pull (the model in FA_MODEL from .env / defaults qwen3.6:35b)
+#   4. ollama pull (FA_MODEL from .env / defaults qwen3.6:35b; plus the codegraph
+#      digest + embedding models when FA_CODEGRAPH_TOOL=1)
 #   5. OpenCode install (curl | bash)
 #   6. writes ~/.config/opencode/opencode.json with the free-agent provider
 #      (idempotent — merges if the key already exists)
@@ -322,12 +323,29 @@ ensure_ollama_installed() {
      fi
    fi
 
-   # ---------- pull / verify model -----------------------------------------------
-   if ollama list 2>/dev/null | grep -qF "$model"; then
-     echo "[free-agent] model '$model' is already available — skipping pull"
-   else
-     echo "[free-agent] pulling model: $model  [NOTE: This may take a while, depending on your network speed]"
-     ollama pull "$model" || { warn "ollama pull failed for $model (may need network connectivity)"; }
+   # ---------- pull / verify model(s) --------------------------------------------
+   # The main agent/summary model, plus (when codegraph is enabled) its digest and
+   # embedding models. The embedding model in particular MUST be present: the
+   # codegraph build runs the expensive summary pass first and only then embeds,
+   # so a missing embed model fails the build AFTER all that work (Ollama returns
+   # 404 "model not found"), leaving an empty index dir. Pull it up front.
+   pull_if_missing() {
+     local m=$1
+     [ -n "$m" ] || return 0
+     if ollama list 2>/dev/null | grep -qF "$m"; then
+       echo "[free-agent] model '$m' is already available — skipping pull"
+     else
+       echo "[free-agent] pulling model: $m  [NOTE: This may take a while, depending on your network speed]"
+       ollama pull "$m" || { warn "ollama pull failed for $m (may need network connectivity)"; }
+     fi
+   }
+
+   pull_if_missing "$model"
+   if [ "${FA_CODEGRAPH_TOOL:-1}" = "1" ]; then
+     # Digest model defaults to FA_MODEL (already pulled above); only pull if the
+     # user overrode it. Embedding model defaults to nomic-embed-text.
+     [ -n "${FA_CODEGRAPH_MODEL:-}" ] && pull_if_missing "$FA_CODEGRAPH_MODEL"
+     pull_if_missing "${FA_CODEGRAPH_EMBED_MODEL:-nomic-embed-text}"
    fi
 
    return 0

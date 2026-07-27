@@ -30,6 +30,7 @@ from typing import List
 from .engine import (
     get_concept_index,
     init_or_sync,
+    note_activity,
     on_file_changed,
     query_codeconcept,
     recall_codeconcept,
@@ -74,6 +75,7 @@ __all__ = [
     "missing_deps",
     "init_or_sync",
     "on_file_changed",
+    "note_activity",
     "get_concept_index",
     "recall_codeconcept",
     "query_codeconcept",
