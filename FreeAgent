@@ -79,7 +79,7 @@ expand_tilde() { printf '%s' "${1/#\~/$HOME}"; }
 # FA_CLI_PICKER=none disables it entirely (straight to the text prompt).
 pick_dir_gui() {
   [ "${FA_CLI_PICKER:-auto}" = "none" ] && return 1
-  local path="" prompt="Choose the project folder for the CLI"
+  local path="" prompt="Choose the project folder (Where do you want to write or modify code?)"
   case "$(uname -s)" in
     Darwin*)
       command -v osascript &>/dev/null || return 1
@@ -574,7 +574,8 @@ if [ "${FA_LAUNCH_CLI:-0}" = "1" ]; then
   # Run the proxy in the background, wait until it's reachable, then hand this
   # same terminal to an interactive CLI session. Quitting the CLI tears the
   # proxy down (via the EXIT trap), so one terminal window = one full session.
-  CLI_CMD="${FA_CLI_CMD:-opencode}"
+  LOCAL_OPENCODE="$VENV_DIR/bin/opencode"
+    CLI_CMD="${FA_CLI_CMD:-$LOCAL_OPENCODE}"
   CONNECT_HOST="$(proxy_connect_host)"
 
   # Redirect all proxy / uvicorn output to a log file so it doesn't overlay
