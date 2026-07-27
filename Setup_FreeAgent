@@ -385,9 +385,6 @@ main_menu() {
       n=$((n+1))
     done
     echo
-    echo "   L) Standard Local server settings (do this if you just want the usual setup, sets all defaults)"
-    echo "   R) Standard Remote server settings (do this if you have a remote ollama server, set location and model, otherwise sets all defaults)"
-    echo
     # echo "   a) Walk through every setting (guided)"   # hidden; 'a' still works below
     echo "   s) Save .env and exit"
     echo "   q) Quit without saving"

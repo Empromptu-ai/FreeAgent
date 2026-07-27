@@ -541,8 +541,16 @@ fi
 # Skip the local-Ollama install/serve/pull dance when asked. FA_SKIP_OLLAMA is
 # the targeted switch (use it for a REMOTE Ollama: no local daemon, but pip
 # install still runs). FA_SKIP_INSTALL implies it too, for backward-compat.
-if [ "${FA_SKIP_OLLAMA:-0}" = "1" ] || [ "${FA_SKIP_INSTALL:-0}" = "1" ]; then
-  echo "[free-agent] skipping local Ollama setup (FA_SKIP_OLLAMA/FA_SKIP_INSTALL=1)"
+# Additionally, if OLLAMA_BASE_URL points to a non‑localhost endpoint, assume a remote server and skip installing locally.
+remote_ollama=false
+if [ -n "${OLLAMA_BASE_URL:-}" ]; then
+  case "$OLLAMA_BASE_URL" in
+    http://127.0.0.1:*|http://localhost:*|https://127.0.0.1:*|https://localhost:*) remote_ollama=false ;;
+    *) remote_ollama=true ;;
+  esac
+fi
+if [ "${FA_SKIP_OLLAMA:-0}" = "1" ] || [ "${FA_SKIP_INSTALL:-0}" = "1" ] || [ "$remote_ollama" = true ]; then
+  echo "[free-agent] skipping local Ollama setup (FA_SKIP_OLLAMA/FA_SKIP_INSTALL=1 or remote OLLAMA_BASE_URL)"
 else
   ensure_ollama_installed "$(uname -s)" && echo "[ok] Ollama primed"
 fi
