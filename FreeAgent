@@ -237,12 +237,37 @@ load_env() {
   fi
 }
 
+# Resolve the ollama binary and print its absolute path (nothing if absent).
+# Same problem as find_opencode: this script runs in a NON-interactive, non-login
+# shell (shebang), so the user's rc files aren't sourced. That means Homebrew's
+# shellenv (Apple Silicon puts brew in /opt/homebrew/bin) and the ollama.com
+# installer's PATH edits are usually NOT visible here — so `command -v ollama`
+# misses a binary that was just installed, causing an endless reinstall loop and
+# a failed daemon start. Checking the known install dirs too keeps detection and
+# launch consistent across runs.
+find_ollama() {
+  local p
+  p="$(command -v ollama 2>/dev/null || true)"
+  if [ -n "$p" ]; then printf '%s' "$p"; return 0; fi
+  local cand
+  for cand in \
+    /opt/homebrew/bin/ollama \
+    /usr/local/bin/ollama \
+    /usr/bin/ollama \
+    "$HOME/.local/bin/ollama" \
+    "/Applications/Ollama.app/Contents/Resources/ollama"; do
+    if [ -x "$cand" ]; then printf '%s' "$cand"; return 0; fi
+  done
+  return 1
+}
+
 ensure_ollama_installed() {
    local os=$1
    local model="${FA_MODEL:-qwen3.6:35b}"
+   local ollama_bin
 
    # ---------- install if absent -------------------------------------------------
-   if ! command -v ollama &>/dev/null; then
+   if ! ollama_bin="$(find_ollama)"; then
      echo "[free-agent] ollama not found — installing …"
      case "$os" in
        Darwin*) install_with_brew ollama || { warn "Failed to install ollama via brew"; return 1; } ;;
@@ -256,15 +281,21 @@ ensure_ollama_installed() {
          return 1
          ;;
      esac
-     if ! command -v ollama &>/dev/null; then
+     # Re-resolve via the known install dirs, not just PATH — the freshly
+     # installed binary usually isn't on this non-login shell's PATH yet.
+     if ! ollama_bin="$(find_ollama)"; then
        warn "ollama binary not found after install — check your PATH."
        echo "   Hint: source ~/.zshrc (or restart your terminal) and re-run this script."
        return 1
      fi
      echo "[ok] ollama installed"
    else
-     echo "[free-agent] ollama already installed ($(ollama --version 2>/dev/null || echo 'unknown'))"
+     echo "[free-agent] ollama already installed ($("$ollama_bin" --version 2>/dev/null || echo 'unknown'))"
    fi
+
+   # Make sure this session (and the daemon we may start) can see the binary,
+   # even though the installer only edited the user's rc files.
+   export PATH="$(dirname "$ollama_bin"):$PATH"
 
    # ---------- detect daemon state (process + port) ------------------------------
    local running=false
@@ -315,7 +346,7 @@ ensure_ollama_installed() {
    else
      # Not running, no managed service → start daemon ourselves
      echo "[free-agent] ollama installed but the daemon is not running — starting …"
-     ollama serve &>/dev/null &
+     "$ollama_bin" serve &>/dev/null &
      local _OLLA_MA_PID=$!
      echo "   started ollama (PID $_OLLA_MA_PID)"
      sleep 3
@@ -330,11 +361,11 @@ ensure_ollama_installed() {
    fi
 
    # ---------- pull / verify model -----------------------------------------------
-   if ollama list 2>/dev/null | grep -qF "$model"; then
+   if "$ollama_bin" list 2>/dev/null | grep -qF "$model"; then
      echo "[free-agent] model '$model' is already available — skipping pull"
    else
      echo "[free-agent] pulling model: $model  [NOTE: This may take a while, depending on your network speed]"
-     ollama pull "$model" || { warn "ollama pull failed for $model (may need network connectivity)"; }
+     "$ollama_bin" pull "$model" || { warn "ollama pull failed for $model (may need network connectivity)"; }
    fi
 
    return 0
