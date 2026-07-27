@@ -132,10 +132,35 @@ resolve_cli_dir() {
   fi
 }
 
+# Homebrew on macOS (notably Monterey) refuses to run with only Xcode.app — it
+# needs the standalone Command Line Tools (CLT) package and fails with
+# "Xcode alone is not sufficient on Monterey". `xcode-select -p` can point at
+# Xcode.app while the CLT package is still absent, so we check the CLT package
+# directly. If it's missing, kick off the GUI installer and ask the user to
+# finish it and re-run — the CLT download can't be completed synchronously here.
+ensure_macos_clt() {
+  # Already have the CLT package, or an active CommandLineTools dir with a
+  # working compiler? Then Homebrew is satisfied.
+  if pkgutil --pkg-info=com.apple.pkg.CLTools_Executables &>/dev/null; then
+    return 0
+  fi
+  if [ -x /Library/Developer/CommandLineTools/usr/bin/clang ]; then
+    return 0
+  fi
+  echo "[free-agent] Homebrew needs Apple's Command Line Tools (Xcode.app alone isn't enough on this macOS)."
+  echo "[free-agent] Opening the Command Line Tools installer …"
+  xcode-select --install 2>/dev/null || true
+  warn "Finish the 'Command Line Tools' install in the popup that appeared, then re-run  ./FreeAgent"
+  return 1
+}
+
 install_with_brew() {
   if ! command -v brew &>/dev/null; then
     warn "Homebrew not found — install it at https://brew.sh (then re-run this script)"
     return 1
+  fi
+  if [ "$(uname -s)" = "Darwin" ]; then
+    ensure_macos_clt || return 1
   fi
   brew install "$@"
 }
