@@ -8,7 +8,21 @@ the two flows below. Both end with `./FreeAgent`, which is idempotent —
 re-run it any time.
 
 ### First time setup -  
-Run `./Setup_FreeAgent` first.** It's a friendly, interactive
+
+#### Set up an Ollama server, either on the current computer or remotely.  This is pretty quick:
+Ubuntu:
+bash
+curl -fsSL https://ollama.com/install.sh | sh
+
+Mac:
+bash
+brew install ollama
+(or download the app from https://ollama.com/download)
+
+#### Then run ollama serve (if not auto-started) and ollama run llama3 (or any model) to start using it.
+
+
+### Run `./Setup_FreeAgent` to put in whether you want a local or remote server. It's a friendly, interactive
 configurator (no prior setup needed) that updates your
 `.env` for you. Chances are, you want a standard local install, or a remote install
 if you have an Ollama server somewhere else already.  If you're not sure, just double-click on
