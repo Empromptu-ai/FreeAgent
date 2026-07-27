@@ -275,7 +275,14 @@ ensure_ollama_installed() {
    # ---------- check for managed services ──────────── (launchd / systemd) -------
    local service_exists=false
    if [ "$os" = "Darwin" ]; then
-     if brew services list 2>/dev/null | grep -q ollama; then
+     # NB: `brew services list` shows every formula that DEFINES a service, even
+     # when it's stopped — so a plain `grep ollama` is true right after a fresh
+     # `brew install` and would wrongly send us into the passive "wait" branch
+     # below instead of starting the daemon ourselves. Only treat it as an
+     # existing service if its status is actually started/running.
+     local brew_status
+     brew_status="$(brew services list 2>/dev/null | awk '$1=="ollama"{print $2}')"
+     if [ "$brew_status" = "started" ] || [ "$brew_status" = "running" ]; then
        service_exists=true
      elif launchctl list com.github.ollama.ollama &>/dev/null; then
        service_exists=true
