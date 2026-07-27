@@ -311,16 +311,83 @@ detect_ram_gb() {
   return 1
 }
 
-# Suggested Ollama model for a given whole-GB RAM figure. Tiers:
-#   <8 -> 3b | 8-15 -> 8b | 16-31 -> 14b | 32-63 -> 35b | >=64 -> 70b
-suggest_model_for_ram() {  # gb
-  local gb="$1"
-  if   [ "$gb" -ge 90 ]; then echo "gpt-oss:120b"
-  elif [ "$gb" -ge 32 ]; then echo "qwen3.6:35b"
-  elif [ "$gb" -ge 24 ]; then echo "qwen3.5:27b"
-  elif [ "$gb" -ge 20  ]; then echo "gpt-oss:20b"
-  else                        echo "deepseek-coder-v2:16b"
-  fi
+# ---- model catalog -----------------------------------------------------------
+# The models offered in the local picker, ordered smallest -> largest by the
+# whole-GB RAM/VRAM we suggest for a comfortable run. MODEL_NAMES[i] is the
+# Ollama tag; MODEL_MINGB[i] is its suggested RAM/VRAM in GB. This is the single
+# source of truth for both the RAM->model suggestion and the interactive list.
+MODEL_NAMES=(
+  "qwen2.5-coder:3b"
+  "qwen2.5-coder:7b"
+  "deepseek-coder-v2:16b"
+  "gpt-oss:20b"
+  "qwen3.5:27b"
+  "qwen3.6:35b"
+  "gpt-oss:120b"
+)
+MODEL_MINGB=( 4 8 16 20 24 32 90 )
+
+# Index into the model catalog for a given whole-GB RAM figure: the largest
+# model whose suggested RAM/VRAM still fits. Prints a 0-based index (always
+# valid — never below the smallest model).
+suggest_model_index_for_ram() {  # gb -> index
+  local gb="$1" i best=0
+  for i in "${!MODEL_MINGB[@]}"; do
+    if [ "$gb" -ge "${MODEL_MINGB[$i]}" ]; then best="$i"; fi
+  done
+  printf '%s' "$best"
+}
+
+# Suggested Ollama model tag for a given whole-GB RAM figure.
+suggest_model_for_ram() {  # gb -> model tag
+  printf '%s' "${MODEL_NAMES[$(suggest_model_index_for_ram "$1")]}"
+}
+
+# ---- interactive model picker ------------------------------------------------
+# Arrow-key (or j/k) scrollable list of MODEL_NAMES with their suggested
+# RAM/VRAM, pre-highlighting index $1. Enter selects; 'm' means "let me type my
+# own name"; q/Esc-esc cancels. The chosen tag (or the sentinel __manual__, or
+# empty on cancel) is returned in the global PICK_RESULT. Pure bash 3.2: single
+# keystrokes via `read -rsn1`, redraw by moving the cursor up over the list.
+PICK_RESULT=""
+_draw_model_list() {  # selected-index
+  local sel="$1" i marker line hi
+  for i in "${!MODEL_NAMES[@]}"; do
+    printf '\033[2K'                       # clear the whole line first
+    line="$(printf '  %-24s ~%s GB' "${MODEL_NAMES[$i]}" "${MODEL_MINGB[$i]}")"
+    if [ "$i" -eq "$sel" ]; then
+      printf '\033[7m> %s\033[0m\n' "${line# }"   # reverse-video the current row
+    else
+      printf '%s\n' "$line"
+    fi
+  done
+}
+
+pick_model() {  # default-index
+  local sel="$1" n="${#MODEL_NAMES[@]}" key rest
+  PICK_RESULT=""
+  printf 'Use up/down (or j/k) to move, Enter to choose, m to type a name yourself, q to cancel.\n\n' >&2
+  _draw_model_list "$sel" >&2
+  while true; do
+    IFS= read -rsn1 key || { PICK_RESULT=""; return 1; }
+    case "$key" in
+      $'\x1b')                              # escape: arrow sequence or bare Esc
+        IFS= read -rsn2 rest 2>/dev/null || rest=""
+        case "$rest" in
+          '[A') sel=$(( (sel - 1 + n) % n )) ;;
+          '[B') sel=$(( (sel + 1) % n )) ;;
+          '')   PICK_RESULT=""; return 1 ;; # bare Esc -> cancel
+        esac
+        ;;
+      k|K) sel=$(( (sel - 1 + n) % n )) ;;
+      j|J) sel=$(( (sel + 1) % n )) ;;
+      m|M) PICK_RESULT="__manual__"; return 0 ;;
+      q|Q) PICK_RESULT=""; return 1 ;;
+      '')  PICK_RESULT="${MODEL_NAMES[$sel]}"; return 0 ;;  # Enter
+    esac
+    printf '\033[%dA' "$n" >&2              # cursor back to top of the list
+    _draw_model_list "$sel" >&2
+  done
 }
 
 # L/R quick setups: load .env.example defaults, apply the server overrides, save.
@@ -348,18 +415,32 @@ quick_setup() {
   else
     echo
     echo "==== Standard Local server settings ===="
-    local gb model_default
+    local gb default_idx model
     if gb="$(detect_ram_gb)"; then
-      model_default="$(suggest_model_for_ram "$gb")"
-      echo "Detected ~${gb} GB RAM — suggested model: ${model_default}"
+      default_idx="$(suggest_model_index_for_ram "$gb")"
+      echo "Detected ~${gb} GB RAM — suggested model is highlighted below."
     else
-      model_default="qwen3.6:35b"
-      echo "Couldn't detect this machine's RAM — falling back to ${model_default}."
+      default_idx="$(suggest_model_index_for_ram 32)"   # sensible mid-tier fallback
+      echo "Couldn't detect this machine's RAM — a mid-tier model is highlighted below."
     fi
-    echo "(Press Enter to accept the suggested model, or type a different one.)"
-    printf '   > FA_MODEL [%s]: ' "$model_default"
-    IFS= read -r model || model=""
-    [ -z "$model" ] && model="$model_default"
+    echo
+    pick_model "$default_idx"
+    case "$PICK_RESULT" in
+      "")            # cancelled: fall back to the suggested default
+        model="${MODEL_NAMES[$default_idx]}"
+        echo
+        echo "[setup] No selection made — using the suggested model: ${model}"
+        ;;
+      "__manual__")  # user wants to type their own tag
+        echo
+        printf '   > FA_MODEL (type an Ollama model name): '
+        IFS= read -r model || model=""
+        [ -z "$model" ] && model="${MODEL_NAMES[$default_idx]}"
+        ;;
+      *)
+        model="$PICK_RESULT"
+        ;;
+    esac
     set_key OLLAMA_BASE_URL "http://localhost:11434"
     set_key FA_MODEL "$model"
     echo
