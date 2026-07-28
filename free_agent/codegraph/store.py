@@ -54,6 +54,8 @@ DEFAULT_CONFIG = {
                                   # Runs in the background, so a generous cap beats
                                   # returning empty summaries under a busy Ollama.
     "skip_methods": False,        # summarize only classes + top-level functions
+    "reasoning": "off",           # digest-call thinking effort (FA_CODEGRAPH_REASONING).
+                                  # off = fast; thinking models default it ON.
 }
 
 

@@ -129,6 +129,8 @@ def _resolve_env_config(store: Store) -> Dict[str, object]:
             cfg["summarize_timeout"] = max(10, int(os.environ["FA_CODEGRAPH_TIMEOUT"]))
         except ValueError:
             pass
+    if os.environ.get("FA_CODEGRAPH_REASONING"):
+        cfg["reasoning"] = os.environ["FA_CODEGRAPH_REASONING"]
     return cfg
 
 
@@ -166,7 +168,8 @@ class Engine:
         return Summarizer(model=cfg["llm_model"], base_url=cfg["ollama_url"],
                           max_workers=int(cfg.get("summarize_workers", 6)),
                           timeout=float(cfg.get("summarize_timeout", 300)),
-                          before_call=_GATE.wait_until_quiet)
+                          before_call=_GATE.wait_until_quiet,
+                          reasoning=cfg.get("reasoning", "off"))
 
     def _embed(self, texts: List[str], cfg):
         from .embed import embed_texts
@@ -253,6 +256,11 @@ class Engine:
             self.store.save_entities(entities)
             return
 
+        # Flush entities.json up front so a file appears within seconds of the
+        # build starting (immediate "it's working" feedback) and so even a couple
+        # of completed summaries survive a quit for the next run to resume from.
+        self.store.save_entities(entities)
+
         items = [(r.node_id, r.file, self._entity_code(r)) for r in todo]
         first_error = {"msg": None}
         counters = {"n": 0}
@@ -276,10 +284,12 @@ class Engine:
             if res.get("_error"):
                 if first_error["msg"] is None:
                     first_error["msg"] = res["_error"]
-            # Checkpoint to disk periodically so a build killed mid-pass (e.g. the
+            # Checkpoint to disk frequently so a build killed mid-pass (e.g. the
             # session is quit) keeps its progress for the next run to resume from.
+            # Writing ~100KB of JSON every few completions is cheap next to an LLM
+            # call, and it means almost no summarize work is ever lost.
             counters["n"] += 1
-            if counters["n"] % 15 == 0:
+            if counters["n"] % 5 == 0:
                 try:
                     self.store.save_entities(entities)
                 except Exception:

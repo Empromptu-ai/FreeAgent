@@ -69,7 +69,8 @@ def _parse_json(text: str) -> Dict[str, str]:
 
 class Summarizer:
     def __init__(self, model: str, base_url: str, temperature: float = 0.15,
-                 max_workers: int = 6, timeout: float = 120.0, before_call=None):
+                 max_workers: int = 6, timeout: float = 120.0, before_call=None,
+                 reasoning: str = "off"):
         self.model = model
         self.base_url = base_url
         self.temperature = temperature
@@ -78,11 +79,17 @@ class Summarizer:
         # Optional gate called before every LLM request (e.g. the activity gate
         # that pauses the build while the agent is using the GPU).
         self.before_call = before_call
+        # These are mechanical JSON extractions, so thinking is pure waste — and
+        # thinking models (e.g. Qwen3) default it ON, generating a long reasoning
+        # trace per call that dominates build time. Default it OFF; the backend
+        # translates "off" to Ollama's ``think: false``.
+        self.reasoning = reasoning
 
     def _backend(self) -> OllamaBackend:
         return OllamaBackend(
             base_url=self.base_url, model=self.model,
             temperature=self.temperature, timeout=self.timeout,
+            reasoning=self.reasoning,
         )
 
     def _one(self, system: str, prompt: str) -> Dict[str, str]:

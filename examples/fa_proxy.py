@@ -99,6 +99,8 @@ Environment:
                              nomic-embed-text).
     FA_CODEGRAPH_RESOLUTION  Leiden resolution / concept granularity (default 1.0).
     FA_CODEGRAPH_WORKERS     concurrent digest calls to Ollama (default 6).
+    FA_CODEGRAPH_REASONING   thinking effort for digest calls (default "off";
+                             thinking models default it ON and run 10-20x slower).
     FA_CODEGRAPH_TIMEOUT     per digest call timeout, seconds (default 300).
     FA_CODEGRAPH_IDLE        1 (default) = pause the background build's GPU calls
                              while the agent is mid-turn; 0 = build flat-out.
