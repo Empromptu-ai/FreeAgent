@@ -87,10 +87,32 @@ Environment:
                       response as-is (default 2).
     FA_CONTINUE_MSG   the nudge text sent on an empty reply (default
                       "please continue.").
+    FA_CODEGRAPH_TOOL enable the Graph-RAG code-concept system (default 1).
+                      Requires the optional extra: pip install -e ".[codegraph]".
+                      Missing extra -> feature disabled, proxy unaffected.
+    FA_CODEGRAPH_LIVE set to 1 to rebuild the index incrementally on file
+                      changes (watchdog). Off by default; the initial build runs
+                      once the launcher POSTs the project root to /codegraph/init.
+    FA_CODEGRAPH_MODEL       digest LLM model (default = FA_MODEL). A smaller,
+                             faster model here cuts build time substantially.
+    FA_CODEGRAPH_EMBED_MODEL embedding model via /api/embed (default
+                             nomic-embed-text).
+    FA_CODEGRAPH_RESOLUTION  Leiden resolution / concept granularity (default 1.0).
+    FA_CODEGRAPH_WORKERS     concurrent digest calls to Ollama (default 6).
+    FA_CODEGRAPH_REASONING   thinking effort for digest calls (default "off";
+                             thinking models default it ON and run 10-20x slower).
+    FA_CODEGRAPH_TIMEOUT     per digest call timeout, seconds (default 300).
+    FA_CODEGRAPH_IDLE        1 (default) = pause the background build's GPU calls
+                             while the agent is mid-turn; 0 = build flat-out.
+    FA_CODEGRAPH_QUIET_SECONDS  agent-silence before the build resumes (default 5).
+    FA_CODEGRAPH_SKIP_METHODS  1 = summarize only classes + top-level functions.
+    FA_CODEGRAPH_EXCLUDE     extra comma-separated dir names to exclude.
+    FA_CODEGRAPH_MAX_FILE_KB  skip source files larger than this (default 512).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -151,6 +173,27 @@ NUM_FULL_TEXT_TURNS = int(os.environ.get("FA_NUM_FULL_TEXT_TURNS", "1"))
 CONTINUE_ON_EMPTY = os.environ.get("FA_CONTINUE_ON_EMPTY") == "1"
 CONTINUE_MAX = int(os.environ.get("FA_CONTINUE_MAX", "2"))
 CONTINUE_MSG = os.environ.get("FA_CONTINUE_MSG", "please continue.")
+
+# --- Graph-RAG code-concept system (optional) -------------------------------
+# When FA_CODEGRAPH_TOOL=1 (default) AND the optional [codegraph] extra is
+# installed, the proxy indexes the project into a concept graph, injects a
+# concept index into the main-agent context each turn, and serves the
+# recall/query code-concept tools. A missing extra degrades to "disabled" — the
+# import is lazy and guarded so the proxy never crashes on a missing dep.
+CODEGRAPH_TOOL = os.environ.get("FA_CODEGRAPH_TOOL", "1") == "1"
+# Live mode: rebuild incrementally on file changes via watchdog (§4). Off by
+# default; the launcher triggers an initial build regardless.
+CODEGRAPH_LIVE = os.environ.get("FA_CODEGRAPH_LIVE") == "1"
+_cg = None
+CODEGRAPH_OK = False
+if CODEGRAPH_TOOL:
+    try:
+        from free_agent import codegraph as _cg  # lazy heavy deps inside
+        CODEGRAPH_OK = _cg.available()
+    except Exception as _e:  # pragma: no cover - import-time degradation
+        print(f"[codegraph] import failed, disabling ({type(_e).__name__}: {_e})",
+              flush=True)
+        _cg, CODEGRAPH_OK = None, False
 
 # --- System-prompt override -------------------------------------------------
 # Master switch: the override only applies when FA_SYSTEM_OVERRIDE=1, so you can
@@ -279,6 +322,16 @@ async def _lifespan(_app: FastAPI):
     else:
         print("   sys-prompt: override off (host prompt passes through)", flush=True)
     print(f"   archive → : {CONFIG.resolved_root()}/<session-id>/", flush=True)
+    if not CODEGRAPH_TOOL:
+        print("   codegraph : off (FA_CODEGRAPH_TOOL=0)", flush=True)
+    elif CODEGRAPH_OK:
+        live = " + live watch" if CODEGRAPH_LIVE else ""
+        idle = "idle-aware" if os.environ.get("FA_CODEGRAPH_IDLE", "1") == "1" else "flat-out"
+        print(f"   codegraph : on{live}, {idle} build (awaiting POST /codegraph/init)",
+              flush=True)
+    else:
+        miss = ", ".join(_cg.missing_deps()) if _cg is not None else "import failed"
+        print(f"   codegraph : unavailable — install .[codegraph] ({miss})", flush=True)
     print("   waiting for POST /v1/chat/completions from the host…", flush=True)
     print("─────────────────────────────────────────────────────────", flush=True)
     yield
@@ -536,6 +589,12 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
     # rather than in the host's config; the host's model id is just a label.
     body["model"] = MAIN_MODEL
 
+    # Tell the codegraph build the agent is active, so its background index build
+    # pauses instead of fighting this request for the GPU. Marked again at the
+    # response's completion (below) so a long streaming turn stays "active".
+    if CODEGRAPH_OK and _cg is not None:
+        _cg.note_activity()
+
     # Drop/keep tools per FA_TOOLS_ALLOW / FA_TOOLS_DENY (default: deny "glob").
     tools_in = body.get("tools") or []
     kept = _filter_tools(tools_in) or []
@@ -592,7 +651,29 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
 
     # Send: prior turns as compact summaries + the in-flight turn verbatim.
     compact = _strip_meta(oai.from_internal(session.live_history))
-    body["messages"] = compact + live
+
+    # Inject the code-concept index as an extra system message (§6/§8). This is
+    # only reachable on the main-agent path (the aux/no-tools call returned early
+    # above), so it never lands on title/summary passthroughs. Empty while the
+    # index is still building or the extra is disabled → nothing injected.
+    concept_msgs: List[Dict[str, Any]] = []
+    if CODEGRAPH_OK and _cg is not None:
+        try:
+            idx = _cg.get_concept_index()
+        except Exception:
+            idx = ""
+        if idx:
+            concept_msgs = [{
+                "role": "system",
+                "content": (
+                    "Code-concept index for this codebase (one line per "
+                    "concept: '<tag>: <summary>'). Use the recall_codeconcept / "
+                    "query_codeconcept tools to pull the actual code for any "
+                    "concept:\n" + idx
+                ),
+            }]
+
+    body["messages"] = compact + concept_msgs + live
     print(
         f"[rework] session={x_session_id!r} history {len(history)}→{len(compact)} summary msgs "
         f"+ {len(live)} live → {CONFIG.resolved_root()}/{x_session_id}/",
@@ -609,10 +690,14 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
         _dump_outbound(x_session_id, turn_no, body["messages"])
 
     # Capture the main model's response(s) for this turn (streamed or not) — for
-    # the from-model file and/or the complete interleaved transcript.
+    # the from-model file and/or the complete interleaved transcript, and to
+    # re-mark agent activity at completion so a long streaming turn keeps the
+    # codegraph build paused for its whole duration (not just its first token).
     capture = None
-    if AUDIT_INBOUND or AUDIT_FULL:
+    if AUDIT_INBOUND or AUDIT_FULL or CODEGRAPH_OK:
         def capture(msg, _sid=x_session_id, _tn=turn_no, _live=live):
+            if CODEGRAPH_OK and _cg is not None:
+                _cg.note_activity()
             if AUDIT_INBOUND:
                 _capture_response(_sid, _tn, msg)
             if AUDIT_FULL:
@@ -628,6 +713,68 @@ async def recall(request: Request):
     print(f"[recall] session={data.get('session', 'opencode')!r} key={data.get('key')!r}", flush=True)
     session = ca.session(data.get("session", "opencode"))
     return {"text": session.recall(data["key"])}
+
+
+@app.post("/codegraph/init")
+async def codegraph_init(request: Request):
+    """Launcher calls this once the proxy is up, POSTing the project root. The
+    full build / incremental sync (§3/§4) runs OFF the request path in a
+    background thread so a large repo never blocks startup or this response."""
+    data = await request.json()
+    input_dir = data.get("dir")
+    if not (CODEGRAPH_OK and _cg is not None):
+        reason = "extra not installed" if _cg is None else "unavailable"
+        return {"ok": False, "status": "disabled", "reason": reason}
+    if not input_dir:
+        return JSONResponse({"ok": False, "error": "missing 'dir'"}, status_code=400)
+
+    def _run():
+        try:
+            _cg.init_or_sync(input_dir)
+        except Exception as e:  # status endpoint surfaces this; don't crash
+            print(f"[codegraph] build failed ({type(e).__name__}: {e})", flush=True)
+        if CODEGRAPH_LIVE:
+            try:
+                _cg.start_watch(input_dir)
+            except Exception:
+                pass
+
+    print(f"[codegraph] init requested for {input_dir!r} (building in background)",
+          flush=True)
+    asyncio.get_event_loop().run_in_executor(None, _run)
+    return {"ok": True, "status": "building", "dir": input_dir}
+
+
+@app.post("/codegraph/recall")
+async def codegraph_recall(request: Request):
+    """Called by the ``recall_codeconcept`` tool: concept tags → code digest."""
+    data = await request.json()
+    tags = data.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    print(f"[codegraph] recall tags={tags!r}", flush=True)
+    if not (CODEGRAPH_OK and _cg is not None):
+        return {"text": "Code-concept index is not available."}
+    return {"text": _cg.recall_codeconcept(tags)}
+
+
+@app.post("/codegraph/query")
+async def codegraph_query(request: Request):
+    """Called by the ``query_codeconcept`` tool: free text → code digest."""
+    data = await request.json()
+    query = data.get("query") or ""
+    print(f"[codegraph] query={query!r}", flush=True)
+    if not (CODEGRAPH_OK and _cg is not None):
+        return {"text": "Code-concept index is not available."}
+    return {"text": _cg.query_codeconcept(query)}
+
+
+@app.get("/codegraph/status")
+async def codegraph_status():
+    if not (CODEGRAPH_OK and _cg is not None):
+        return {"status": "disabled",
+                "missing": (_cg.missing_deps() if _cg is not None else None)}
+    return _cg.status()
 
 
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])

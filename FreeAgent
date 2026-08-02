@@ -7,7 +7,8 @@
 #   1. venv creation (if absent)
 #   2. pip install library + proxy deps (unless FA_SKIP_INSTALL=1)
 #   3. .env from .env.example (skipped if .env already exists, unless --force)
-#   4. ollama pull (the model in FA_MODEL from .env / defaults qwen3.6:35b)
+#   4. ollama pull (FA_MODEL from .env / defaults qwen3.6:35b; plus the codegraph
+#      digest + embedding models when FA_CODEGRAPH_TOOL=1)
 #   5. OpenCode install (curl | bash)
 #   6. writes ~/.config/opencode/opencode.json with the free-agent provider
 #      (idempotent — merges if the key already exists)
@@ -322,12 +323,29 @@ ensure_ollama_installed() {
      fi
    fi
 
-   # ---------- pull / verify model -----------------------------------------------
-   if ollama list 2>/dev/null | grep -qF "$model"; then
-     echo "[free-agent] model '$model' is already available — skipping pull"
-   else
-     echo "[free-agent] pulling model: $model  [NOTE: This may take a while, depending on your network speed]"
-     ollama pull "$model" || { warn "ollama pull failed for $model (may need network connectivity)"; }
+   # ---------- pull / verify model(s) --------------------------------------------
+   # The main agent/summary model, plus (when codegraph is enabled) its digest and
+   # embedding models. The embedding model in particular MUST be present: the
+   # codegraph build runs the expensive summary pass first and only then embeds,
+   # so a missing embed model fails the build AFTER all that work (Ollama returns
+   # 404 "model not found"), leaving an empty index dir. Pull it up front.
+   pull_if_missing() {
+     local m=$1
+     [ -n "$m" ] || return 0
+     if ollama list 2>/dev/null | grep -qF "$m"; then
+       echo "[free-agent] model '$m' is already available — skipping pull"
+     else
+       echo "[free-agent] pulling model: $m  [NOTE: This may take a while, depending on your network speed]"
+       ollama pull "$m" || { warn "ollama pull failed for $m (may need network connectivity)"; }
+     fi
+   }
+
+   pull_if_missing "$model"
+   if [ "${FA_CODEGRAPH_TOOL:-1}" = "1" ]; then
+     # Digest model defaults to FA_MODEL (already pulled above); only pull if the
+     # user overrode it. Embedding model defaults to nomic-embed-text.
+     [ -n "${FA_CODEGRAPH_MODEL:-}" ] && pull_if_missing "$FA_CODEGRAPH_MODEL"
+     pull_if_missing "${FA_CODEGRAPH_EMBED_MODEL:-nomic-embed-text}"
    fi
 
    return 0
@@ -499,6 +517,57 @@ TS
   fi
 }
 
+place_codegraph_tools() {
+  # Place the Graph-RAG code-concept tools (recall_codeconcept / query_
+  # codeconcept), same pattern as place_recall_tool. Skipped when the feature is
+  # disabled. Like the recall tool, these run inside OpenCode and can't read
+  # FA_PROXY_PORT at runtime, so the proxy's base address is baked into the file.
+  if [ "${FA_CODEGRAPH_TOOL:-1}" != "1" ]; then
+    echo "[free-agent] codegraph disabled (FA_CODEGRAPH_TOOL) — skipping its tools"
+    return 0
+  fi
+
+  local host port base
+  host="$(proxy_connect_host)"
+  port="${FA_PROXY_PORT:-49786}"
+  base="http://$host:$port"
+
+  # Rewrite only the scheme://host:port before a /codegraph/ path, preserving
+  # the endpoint path itself (unlike the /recall sync which rewrites the tail).
+  sync_codegraph_url() {
+    local f=$1
+    sed -i.bak -E "s#https?://[^/\"']+(/codegraph/)#$base\1#g" "$f" && rm -f "$f.bak"
+  }
+
+  local tool
+  for tool in recall_codeconcept query_codeconcept; do
+    local tool_src="$ROOT_DIR/tools/$tool.ts"
+    if [ ! -f "$tool_src" ]; then
+      warn "tools/$tool.ts not found in repo — skipping"
+      continue
+    fi
+    local existing=false
+    for dir in "${TOOLS_BASES[@]}"; do
+      local dest="$dir/$tool.ts"
+      if [ -f "$dest" ]; then
+        sync_codegraph_url "$dest"
+        echo "[free-agent] synced $tool.ts URL -> $dest ($base/codegraph/…)"
+        existing=true
+      fi
+    done
+    if [ "$existing" = false ]; then
+      for dir in "${TOOLS_BASES[@]}"; do
+        mkdir -p "$dir"
+        local dest="$dir/$tool.ts"
+        cp "$tool_src" "$dest"
+        sync_codegraph_url "$dest"
+        echo "[free-agent] placed $tool.ts -> $dest ($base/codegraph/…)"
+        break
+      done
+    fi
+  done
+}
+
 place_theme() {
   local theme_src="$ROOT_DIR/theme/free-agent.json"
 
@@ -576,6 +645,7 @@ fi
 ensure_opencode      && echo "[ok] OpenCode"
 write_opencode_config && echo "[ok] opencode.json"
 place_recall_tool    && echo "[ok] recall tool"
+place_codegraph_tools && echo "[ok] codegraph tools"
 place_theme          && echo "[ok] theme"
 
 # Activate the venv for the proxy launch (.env is already loaded above).
@@ -630,6 +700,17 @@ if [ "${FA_LAUNCH_CLI:-0}" = "1" ]; then
     sleep 0.5
     retries=$((retries - 1))
   done
+
+  # Kick off the Graph-RAG code-concept build for the project the CLI will open.
+  # The proxy runs init_or_sync in a background task, so this POST returns
+  # immediately; a missing [codegraph] extra makes the endpoint a no-op.
+  if [ "${FA_CODEGRAPH_TOOL:-1}" = "1" ] && [ -n "$CLI_DIR" ]; then
+    if curl -s -X POST "http://$CONNECT_HOST:$PORT/codegraph/init" \
+         -H 'content-type: application/json' \
+         -d "{\"dir\": \"$CLI_DIR\"}" >/dev/null 2>&1; then
+      echo "[free-agent] codegraph: init requested for $CLI_DIR (building in background)"
+    fi
+  fi
 
   echo "[free-agent] launching CLI in $CLI_DIR: $CLI_CMD  (quit it to stop the proxy)"
   # Set the terminal window/tab title so our branding shows alongside the CLI's
