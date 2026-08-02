@@ -44,6 +44,18 @@ Run:
 
 Environment:
     OLLAMA_BASE_URL   default http://localhost:11434
+    FA_MAIN_PROVIDER  backend for the agent-facing model (ollama|openai, default
+                      ollama). "openai" forwards the main loop to OPENAI_BASE_URL
+                      with a bearer token instead of the local Ollama server.
+    FA_SUMM_PROVIDER  backend for the internal summary/label/history-folding
+                      calls (ollama|openai, default ollama).
+    FA_EMBED_PROVIDER codegraph embedder (default ollama). Only "ollama" is
+                      implemented; any other value disables codegraph entirely
+                      (there is no OpenAI embedding path).
+    OPENAI_API_KEY    required when any surface is set to "openai".
+    FA_OPENAI_BASE_URL OpenAI-compatible base URL (default
+                      https://api.openai.com/v1; include the /v1 suffix). Point
+                      it at Azure or a gateway if needed.
     FA_MODEL          default qwen3.6:35b   (used for summary/label + ledger,
                       and for the main agent loop unless FA_MAIN_MODEL is set)
     FA_MAIN_MODEL     default = FA_MODEL. The model the main agent loop runs on;
@@ -153,6 +165,34 @@ AGENT_REASONING = _norm_reasoning(
 # agent runs with reasoning on; opt in explicitly with FA_SUMM_REASONING only if
 # you have a specific reason to.
 SUMM_REASONING = _norm_reasoning(os.environ.get("FA_SUMM_REASONING", "off"))
+
+# --- Provider selection (per surface) ---------------------------------------
+# Each model-call surface picks its backend independently; all default to
+# "ollama" so an unconfigured proxy behaves exactly as before.
+#   FA_MAIN_PROVIDER   agent-facing model the proxy forwards to (ollama|openai)
+#   FA_SUMM_PROVIDER   internal summary/label/history-folding calls (ollama|openai)
+#   FA_EMBED_PROVIDER  codegraph embedder — only "ollama" is implemented; any
+#                      other value disables codegraph (see below).
+# OpenAI surfaces read OPENAI_API_KEY and, optionally, FA_OPENAI_BASE_URL (for
+# Azure / OpenAI-compatible gateways; must include the /v1 suffix).
+MAIN_PROVIDER = os.environ.get("FA_MAIN_PROVIDER", "ollama").lower()
+SUMM_PROVIDER = os.environ.get("FA_SUMM_PROVIDER", "ollama").lower()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.environ.get("FA_OPENAI_BASE_URL", "https://api.openai.com/v1")
+
+# Upstream the main-agent path forwards to, plus optional bearer auth. Both
+# branches normalize to a base URL ending in /v1 so URL construction below is
+# uniform. Ollama needs no auth; OpenAI needs the bearer token.
+if MAIN_PROVIDER == "openai":
+    UPSTREAM_BASE = OPENAI_BASE_URL.rstrip("/")
+    UPSTREAM_HEADERS = {"Authorization": f"Bearer {OPENAI_API_KEY}"} if OPENAI_API_KEY else {}
+    # Real OpenAI's reasoning translation differs from Ollama's compat layer.
+    MAIN_REASON_PROVIDER = "openai"
+else:
+    UPSTREAM_BASE = f"{OLLAMA}/v1"
+    UPSTREAM_HEADERS = {}
+    MAIN_REASON_PROVIDER = "ollama-openai"
+
 STORAGE_ROOT = os.environ.get("FA_STORAGE_ROOT", "~/.free_agent")
 AUDIT_OUTBOUND = os.environ.get("FA_AUDIT_OUTBOUND") == "1"
 AUDIT_INBOUND = os.environ.get("FA_AUDIT_INBOUND") == "1"
@@ -184,9 +224,20 @@ CODEGRAPH_TOOL = os.environ.get("FA_CODEGRAPH_TOOL", "1") == "1"
 # Live mode: rebuild incrementally on file changes via watchdog (§4). Off by
 # default; the launcher triggers an initial build regardless.
 CODEGRAPH_LIVE = os.environ.get("FA_CODEGRAPH_LIVE") == "1"
+# Codegraph embeds locally via Ollama's native /api/embed; there is no OpenAI
+# embedding path. If the embedder is pointed anywhere but Ollama, disable the
+# whole subsystem with an explicit reason rather than failing mid-build.
+EMBED_PROVIDER = os.environ.get("FA_EMBED_PROVIDER", "ollama").lower()
 _cg = None
 CODEGRAPH_OK = False
-if CODEGRAPH_TOOL:
+_cg_disabled_reason = None
+if CODEGRAPH_TOOL and EMBED_PROVIDER != "ollama":
+    _cg_disabled_reason = (
+        f"embedder provider is {EMBED_PROVIDER!r}; codegraph requires a local "
+        f"Ollama embedder (set FA_EMBED_PROVIDER=ollama or FA_CODEGRAPH_TOOL=0)"
+    )
+    print(f"[codegraph] disabled: {_cg_disabled_reason}", flush=True)
+elif CODEGRAPH_TOOL:
     try:
         from free_agent import codegraph as _cg  # lazy heavy deps inside
         CODEGRAPH_OK = _cg.available()
@@ -285,7 +336,13 @@ CONFIG = Config(
     storage_root=STORAGE_ROOT,
     # Backend used for the summary/label + file-ledger calls. Register the
     # host's edit/read tool names so file detection recognizes them.
-    llm=LLMConfig(provider="ollama", base_url=OLLAMA, model=MODEL, reasoning=SUMM_REASONING),
+    llm=LLMConfig(
+        provider=SUMM_PROVIDER,
+        base_url=(OPENAI_BASE_URL if SUMM_PROVIDER == "openai" else OLLAMA),
+        api_key=(OPENAI_API_KEY if SUMM_PROVIDER == "openai" else None),
+        model=MODEL,
+        reasoning=SUMM_REASONING,
+    ),
     extra_read_tools={"read"},
     extra_write_tools={"edit", "write", "patch"},
     # Keep the most recent N completed turns as full text; older turns as
@@ -299,9 +356,11 @@ ca = FreeAgent(CONFIG)
 async def _lifespan(_app: FastAPI):
     # ── startup ──
     print("── free_agent proxy ─────────────────────────────", flush=True)
-    print(f"   ollama    : {OLLAMA}", flush=True)
-    print(f"   main model: {MAIN_MODEL}  (agent loop)", flush=True)
-    print(f"   summ model: {MODEL}  (summary/label + ledger)", flush=True)
+    print(f"   upstream  : {UPSTREAM_BASE}  (main={MAIN_PROVIDER})", flush=True)
+    if MAIN_PROVIDER == "ollama" or SUMM_PROVIDER == "ollama" or EMBED_PROVIDER == "ollama":
+        print(f"   ollama    : {OLLAMA}", flush=True)
+    print(f"   main model: {MAIN_MODEL}  (agent loop, {MAIN_PROVIDER})", flush=True)
+    print(f"   summ model: {MODEL}  (summary/label + ledger, {SUMM_PROVIDER})", flush=True)
     print(
         f"   reasoning : {AGENT_REASONING or 'model default'} (agent) / "
         f"{SUMM_REASONING or 'model default'} (summ)",
@@ -324,6 +383,8 @@ async def _lifespan(_app: FastAPI):
     print(f"   archive → : {CONFIG.resolved_root()}/<session-id>/", flush=True)
     if not CODEGRAPH_TOOL:
         print("   codegraph : off (FA_CODEGRAPH_TOOL=0)", flush=True)
+    elif _cg_disabled_reason:
+        print(f"   codegraph : disabled — {_cg_disabled_reason}", flush=True)
     elif CODEGRAPH_OK:
         live = " + live watch" if CODEGRAPH_LIVE else ""
         idle = "idle-aware" if os.environ.get("FA_CODEGRAPH_IDLE", "1") == "1" else "flat-out"
@@ -503,7 +564,7 @@ async def _forward(
     chunks back only until the first real content token arrives, so a normal
     response streams with negligible added latency; an empty one is discarded
     and the retry is streamed in its place."""
-    url = f"{OLLAMA}/v1/chat/completions"
+    url = f"{UPSTREAM_BASE}/chat/completions"
     do_continue = allow_continue and CONTINUE_ON_EMPTY
 
     if body.get("stream"):
@@ -515,7 +576,8 @@ async def _forward(
                 buffer: List[bytes] = []
                 flushed = False
                 async with httpx.AsyncClient(timeout=None) as client:
-                    async with client.stream("POST", url, json=attempt_body) as r:
+                    async with client.stream("POST", url, json=attempt_body,
+                                             headers=UPSTREAM_HEADERS) as r:
                         async for chunk in r.aiter_raw():
                             acc.feed(chunk)
                             if flushed:
@@ -552,7 +614,7 @@ async def _forward(
     attempt_body = body
     for attempt in range(CONTINUE_MAX + 1):
         async with httpx.AsyncClient(timeout=None) as client:
-            r = await client.post(url, json=attempt_body)
+            r = await client.post(url, json=attempt_body, headers=UPSTREAM_HEADERS)
         data = r.json()
         try:
             msg = data["choices"][0]["message"]
@@ -617,7 +679,7 @@ async def chat_completions(request: Request, x_session_id: str = Header("opencod
     # Force the reasoning level too (if configured), so it's chosen here in one
     # place rather than by the host. Ollama's OpenAI-compatible /v1 endpoint
     # takes it as ``reasoning_effort``. Unset -> nothing added -> model default.
-    body.update(_reasoning_params("ollama-openai", AGENT_REASONING))
+    body.update(_reasoning_params(MAIN_REASON_PROVIDER, AGENT_REASONING))
 
     # Substitute our own system prompt for the host's (main agent loop only, so
     # aux title/summary prompts above are left intact). Tool definitions in
@@ -723,7 +785,9 @@ async def codegraph_init(request: Request):
     data = await request.json()
     input_dir = data.get("dir")
     if not (CODEGRAPH_OK and _cg is not None):
-        reason = "extra not installed" if _cg is None else "unavailable"
+        reason = _cg_disabled_reason or (
+            "extra not installed" if _cg is None else "unavailable"
+        )
         return {"ok": False, "status": "disabled", "reason": reason}
     if not input_dir:
         return JSONResponse({"ok": False, "error": "missing 'dir'"}, status_code=400)
@@ -773,16 +837,18 @@ async def codegraph_query(request: Request):
 async def codegraph_status():
     if not (CODEGRAPH_OK and _cg is not None):
         return {"status": "disabled",
+                "reason": _cg_disabled_reason,
                 "missing": (_cg.missing_deps() if _cg is not None else None)}
     return _cg.status()
 
 
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])
 async def passthrough(path: str, request: Request):
-    """Everything else (e.g. GET /v1/models) goes straight to Ollama."""
+    """Everything else (e.g. GET /v1/models) goes straight to the upstream."""
     async with httpx.AsyncClient(timeout=None) as client:
         r = await client.request(
-            request.method, f"{OLLAMA}/v1/{path}", content=await request.body()
+            request.method, f"{UPSTREAM_BASE}/{path}",
+            content=await request.body(), headers=UPSTREAM_HEADERS,
         )
     return JSONResponse(r.json(), status_code=r.status_code)
 
