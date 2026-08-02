@@ -67,14 +67,13 @@ def params_for(provider: str, level: Optional[str]) -> Dict[str, Any]:
         return {}
     p = (provider or "").lower()
 
-    if p == "ollama-openai":
-        # Ollama's OpenAI-compatible layer tolerates ``reasoning_effort: none``.
+    if p in ("ollama-openai", "openai"):
+        # Both speak the OpenAI ``reasoning_effort`` field. The gpt-5 series
+        # accept ``"none"`` as an explicit disable (and require it, not mere
+        # omission, to combine tools with reasoning off); Ollama's compat layer
+        # tolerates it too. Older non-reasoning models are left untouched because
+        # ``level is None`` (unset) already returned ``{}`` above.
         return {"reasoning_effort": "none" if level == OFF else level}
-
-    if p == "openai":
-        # Real OpenAI rejects ``reasoning_effort: none`` — omit the field to get
-        # the model default when reasoning is off.
-        return {} if level == OFF else {"reasoning_effort": level}
 
     if p == "ollama":
         # Native endpoint uses ``think``: a bool, or a level string on models

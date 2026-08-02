@@ -56,6 +56,14 @@ Environment:
     FA_OPENAI_BASE_URL OpenAI-compatible base URL (default
                       https://api.openai.com/v1; include the /v1 suffix). Point
                       it at Azure or a gateway if needed.
+    FA_OPENAI_API     which OpenAI wire API the main agent leg uses when
+                      FA_MAIN_PROVIDER=openai: "responses" (default) or "chat".
+                      The gpt-5 series reject tools+reasoning on chat-completions
+                      and require the Responses API; "chat" forces the legacy
+                      endpoint (fine for models without that restriction). Only
+                      the outbound LLM call changes — OpenCode still talks
+                      chat-completions to the proxy and context handling is
+                      identical.
     FA_MODEL          default qwen3.6:35b   (used for summary/label + ledger,
                       and for the main agent loop unless FA_MAIN_MODEL is set)
     FA_MAIN_MODEL     default = FA_MODEL. The model the main agent loop runs on;
@@ -186,12 +194,23 @@ OPENAI_BASE_URL = os.environ.get("FA_OPENAI_BASE_URL", "https://api.openai.com/v
 if MAIN_PROVIDER == "openai":
     UPSTREAM_BASE = OPENAI_BASE_URL.rstrip("/")
     UPSTREAM_HEADERS = {"Authorization": f"Bearer {OPENAI_API_KEY}"} if OPENAI_API_KEY else {}
-    # Real OpenAI's reasoning translation differs from Ollama's compat layer.
     MAIN_REASON_PROVIDER = "openai"
 else:
     UPSTREAM_BASE = f"{OLLAMA}/v1"
     UPSTREAM_HEADERS = {}
     MAIN_REASON_PROVIDER = "ollama-openai"
+
+# Which OpenAI wire API the main-agent leg uses. The gpt-5 series reject
+# tools+reasoning on /v1/chat/completions and require /v1/responses (which
+# preserves reasoning across tool calls). Default to "responses" for OpenAI so
+# reasoning + tools work out of the box; set FA_OPENAI_API=chat to force the
+# legacy chat-completions endpoint. Ignored unless FA_MAIN_PROVIDER=openai.
+# NOTE: this only affects the outbound LLM call inside _forward — OpenCode still
+# talks chat-completions to the proxy, and all context management is unchanged.
+OPENAI_API = os.environ.get(
+    "FA_OPENAI_API", "responses" if MAIN_PROVIDER == "openai" else "chat"
+).lower()
+MAIN_USE_RESPONSES = MAIN_PROVIDER == "openai" and OPENAI_API == "responses"
 
 STORAGE_ROOT = os.environ.get("FA_STORAGE_ROOT", "~/.free_agent")
 AUDIT_OUTBOUND = os.environ.get("FA_AUDIT_OUTBOUND") == "1"
@@ -356,7 +375,8 @@ ca = FreeAgent(CONFIG)
 async def _lifespan(_app: FastAPI):
     # ── startup ──
     print("── free_agent proxy ─────────────────────────────", flush=True)
-    print(f"   upstream  : {UPSTREAM_BASE}  (main={MAIN_PROVIDER})", flush=True)
+    _api = f", {OPENAI_API} API" if MAIN_PROVIDER == "openai" else ""
+    print(f"   upstream  : {UPSTREAM_BASE}  (main={MAIN_PROVIDER}{_api})", flush=True)
     if MAIN_PROVIDER == "ollama" or SUMM_PROVIDER == "ollama" or EMBED_PROVIDER == "ollama":
         print(f"   ollama    : {OLLAMA}", flush=True)
     print(f"   main model: {MAIN_MODEL}  (agent loop, {MAIN_PROVIDER})", flush=True)
@@ -547,12 +567,224 @@ def _continue_body(body: Dict[str, Any], prev_msg: Dict[str, Any]) -> Dict[str, 
     return nb
 
 
+# ── OpenAI Responses API translation (last-hop only) ───────────────────────
+# The proxy speaks chat-completions everywhere; only the final outbound call to
+# an OpenAI gpt-5-series model is translated to the Responses API, because that
+# endpoint is the only one that accepts tools + reasoning together (and carries
+# reasoning across tool calls). Nothing upstream of _forward changes: the same
+# chat-completions ``body`` goes in, and chat-completions bytes come back out to
+# OpenCode. These helpers are the shim for that one leg.
+
+
+def _content_text(content: Any) -> str:
+    """Flatten a chat message ``content`` (str or block list) to plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                parts.append(b.get("text") or b.get("input_text") or b.get("output_text") or "")
+        return "".join(parts)
+    return str(content)
+
+
+def _chat_messages_to_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """chat ``messages`` -> Responses ``input`` items. Assistant tool_calls become
+    ``function_call`` items and ``tool`` results become ``function_call_output``
+    items, so the full tool-loop history round-trips."""
+    items: List[Dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": m.get("tool_call_id") or m.get("call_id"),
+                "output": _content_text(m.get("content")),
+            })
+            continue
+        text = _content_text(m.get("content"))
+        if role == "assistant":
+            if text.strip():
+                items.append({"role": "assistant",
+                              "content": [{"type": "output_text", "text": text}]})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                items.append({
+                    "type": "function_call",
+                    "call_id": tc.get("id"),
+                    "name": fn.get("name", ""),
+                    "arguments": fn.get("arguments", "") or "",
+                })
+        else:  # system / developer / user
+            items.append({"role": role or "user",
+                          "content": [{"type": "input_text", "text": text}]})
+    return items
+
+
+def _chat_tools_to_responses(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """chat tool defs ({"type":"function","function":{…}}) -> Responses flat form."""
+    out = []
+    for t in tools or []:
+        if t.get("type") == "function" and isinstance(t.get("function"), dict):
+            fn = t["function"]
+            spec = {"type": "function", "name": fn.get("name"),
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}}}
+            if fn.get("description"):
+                spec["description"] = fn["description"]
+            out.append(spec)
+        else:
+            out.append(t)  # already flat / non-function tool
+    return out
+
+
+def _chat_tool_choice_to_responses(tc: Any) -> Any:
+    if tc is None or isinstance(tc, str):
+        return tc  # "auto" / "none" / "required" carry over unchanged
+    if isinstance(tc, dict):
+        name = (tc.get("function") or {}).get("name") or tc.get("name")
+        if name:
+            return {"type": "function", "name": name}
+    return "auto"
+
+
+def _chat_body_to_responses(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate a chat-completions request body into a Responses request body."""
+    r: Dict[str, Any] = {
+        "model": body.get("model"),
+        "input": _chat_messages_to_responses_input(body.get("messages") or []),
+        "stream": bool(body.get("stream")),
+    }
+    tools = _chat_tools_to_responses(body.get("tools"))
+    if tools:
+        r["tools"] = tools
+    tc = _chat_tool_choice_to_responses(body.get("tool_choice"))
+    if tc is not None:
+        r["tool_choice"] = tc
+    eff = body.get("reasoning_effort")
+    if eff:  # "none" / "low" / "high" are all valid Responses efforts for gpt-5
+        r["reasoning"] = {"effort": eff}
+    mt = body.get("max_tokens") or body.get("max_completion_tokens")
+    if mt:
+        r["max_output_tokens"] = mt
+    # temperature is intentionally omitted: gpt-5 reasoning models reject a
+    # non-default temperature, and the host's value is not meaningful here.
+    return r
+
+
+def _responses_usage_to_chat(u: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not u:
+        return None
+    return {
+        "prompt_tokens": u.get("input_tokens", 0),
+        "completion_tokens": u.get("output_tokens", 0),
+        "total_tokens": u.get("total_tokens", 0),
+    }
+
+
+def _responses_json_to_chat(resp: Dict[str, Any]) -> Dict[str, Any]:
+    """A non-streamed Responses object -> a chat-completions completion object."""
+    content_parts: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    for item in resp.get("output") or []:
+        it = item.get("type")
+        if it == "message":
+            for c in item.get("content") or []:
+                if c.get("type") == "output_text":
+                    content_parts.append(c.get("text", ""))
+        elif it == "function_call":
+            tool_calls.append({
+                "id": item.get("call_id"),
+                "type": "function",
+                "function": {"name": item.get("name", ""),
+                             "arguments": item.get("arguments", "") or ""},
+            })
+    msg: Dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    return {
+        "id": resp.get("id"),
+        "object": "chat.completion",
+        "model": resp.get("model"),
+        "choices": [{"index": 0, "message": msg,
+                     "finish_reason": "tool_calls" if tool_calls else "stop"}],
+        "usage": _responses_usage_to_chat(resp.get("usage")),
+    }
+
+
+def _sse_chunk(obj: Dict[str, Any]) -> bytes:
+    """Encode one chat-completions streaming chunk as an SSE ``data:`` line."""
+    obj.setdefault("object", "chat.completion.chunk")
+    return b"data: " + json.dumps(obj).encode("utf-8") + b"\n\n"
+
+
+async def _translate_responses_stream(r):
+    """Consume a Responses SSE stream and yield chat-completions SSE chunk bytes,
+    so the existing _StreamAcc / buffering / OpenCode path is untouched.
+
+    Reasoning events are intentionally dropped — they carry no assistant-visible
+    content and OpenCode's chat-completions parser doesn't expect them."""
+    yield _sse_chunk({"choices": [{"index": 0, "delta": {"role": "assistant"},
+                                   "finish_reason": None}]})
+    tc_index: Dict[str, int] = {}   # Responses item id (fc_…) -> tool_call index
+    next_idx = 0
+    finish = "stop"
+    async for line in r.aiter_lines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            continue
+        t = obj.get("type")
+        if t == "response.output_text.delta":
+            yield _sse_chunk({"choices": [{"index": 0,
+                              "delta": {"content": obj.get("delta", "")},
+                              "finish_reason": None}]})
+        elif t == "response.output_item.added":
+            item = obj.get("item") or {}
+            if item.get("type") == "function_call":
+                idx = next_idx
+                next_idx += 1
+                tc_index[item.get("id")] = idx
+                finish = "tool_calls"
+                yield _sse_chunk({"choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": idx, "id": item.get("call_id"), "type": "function",
+                    "function": {"name": item.get("name", ""),
+                                 "arguments": item.get("arguments", "") or ""},
+                }]}, "finish_reason": None}]})
+        elif t == "response.function_call_arguments.delta":
+            idx = tc_index.get(obj.get("item_id"), 0)
+            yield _sse_chunk({"choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": idx, "function": {"arguments": obj.get("delta", "")},
+            }]}, "finish_reason": None}]})
+    yield _sse_chunk({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+    yield b"data: [DONE]\n\n"
+
+
+def _sse_error_chunk(status: int, err_bytes: bytes) -> bytes:
+    """Surface an upstream error to OpenCode as visible assistant text instead of
+    a silent blank turn (the streaming path can't change the 200 it already
+    committed to, so make the failure legible)."""
+    detail = err_bytes.decode("utf-8", "replace")[:800]
+    return _sse_chunk({"choices": [{"index": 0,
+                       "delta": {"role": "assistant",
+                                 "content": f"[proxy] upstream error {status}: {detail}"},
+                       "finish_reason": "stop"}]})
+
+
 async def _forward(
     body: Dict[str, Any],
     capture: Optional[Callable[[Dict[str, Any]], None]] = None,
     allow_continue: bool = False,
 ):
-    """Forward a (possibly rewritten) request to Ollama, streaming-aware.
+    """Forward a (possibly rewritten) request to the upstream, streaming-aware.
 
     If ``capture`` is given, the reconstructed assistant message the model
     returns is handed to it (after streaming completes, without altering the
@@ -563,9 +795,19 @@ async def _forward(
     "please continue." nudge, up to FA_CONTINUE_MAX times. For streaming we hold
     chunks back only until the first real content token arrives, so a normal
     response streams with negligible added latency; an empty one is discarded
-    and the retry is streamed in its place."""
-    url = f"{UPSTREAM_BASE}/chat/completions"
+    and the retry is streamed in its place.
+
+    When the request carries tools and the main leg is set to the OpenAI
+    Responses API, the outbound call is translated to /v1/responses and its
+    reply translated back to chat-completions — transparently to both OpenCode
+    and the rest of this function. Tool-less calls (e.g. title/summary passes)
+    stay on chat-completions since they have no tools+reasoning conflict."""
+    use_responses = MAIN_USE_RESPONSES and bool(body.get("tools"))
+    url = f"{UPSTREAM_BASE}/responses" if use_responses else f"{UPSTREAM_BASE}/chat/completions"
     do_continue = allow_continue and CONTINUE_ON_EMPTY
+
+    def _payload(b: Dict[str, Any]) -> Dict[str, Any]:
+        return _chat_body_to_responses(b) if use_responses else b
 
     if body.get("stream"):
 
@@ -576,9 +818,22 @@ async def _forward(
                 buffer: List[bytes] = []
                 flushed = False
                 async with httpx.AsyncClient(timeout=None) as client:
-                    async with client.stream("POST", url, json=attempt_body,
+                    async with client.stream("POST", url, json=_payload(attempt_body),
                                              headers=UPSTREAM_HEADERS) as r:
-                        async for chunk in r.aiter_raw():
+                        # Surface upstream failures instead of letting an error
+                        # body masquerade as an empty (and endlessly retried)
+                        # response — the bug that hid the gpt-5 tools+reasoning
+                        # 400 as a silent blank turn.
+                        if r.status_code >= 400:
+                            err = await r.aread()
+                            print(f"[upstream] {r.status_code} error: "
+                                  f"{err.decode('utf-8', 'replace')[:500]}", flush=True)
+                            yield _sse_error_chunk(r.status_code, err)
+                            yield b"data: [DONE]\n\n"
+                            return
+                        chunks = (_translate_responses_stream(r) if use_responses
+                                  else r.aiter_raw())
+                        async for chunk in chunks:
                             acc.feed(chunk)
                             if flushed:
                                 yield chunk
@@ -614,8 +869,17 @@ async def _forward(
     attempt_body = body
     for attempt in range(CONTINUE_MAX + 1):
         async with httpx.AsyncClient(timeout=None) as client:
-            r = await client.post(url, json=attempt_body, headers=UPSTREAM_HEADERS)
-        data = r.json()
+            r = await client.post(url, json=_payload(attempt_body), headers=UPSTREAM_HEADERS)
+        # Surface upstream failures rather than forwarding an error body as if it
+        # were a normal completion.
+        if r.status_code >= 400:
+            try:
+                err_json = r.json()
+            except Exception:
+                err_json = {"error": r.text}
+            print(f"[upstream] {r.status_code} error: {str(err_json)[:500]}", flush=True)
+            return JSONResponse(err_json, status_code=r.status_code)
+        data = _responses_json_to_chat(r.json()) if use_responses else r.json()
         try:
             msg = data["choices"][0]["message"]
         except Exception:
@@ -632,7 +896,7 @@ async def _forward(
                 capture(msg)
             except Exception:
                 pass
-        return JSONResponse(data, status_code=r.status_code)
+        return JSONResponse(data, status_code=200)
 
 
 @app.post("/v1/chat/completions")

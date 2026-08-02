@@ -59,10 +59,8 @@ def test_params_for_none_is_noop_everywhere():
 def test_params_for_openai_style_uses_reasoning_effort():
     for provider in ("ollama-openai", "openai"):
         assert params_for(provider, "high") == {"reasoning_effort": "high"}
-    # Ollama's compat layer tolerates "none"; real OpenAI rejects it, so off maps
-    # to omitting the field entirely there.
-    assert params_for("ollama-openai", "off") == {"reasoning_effort": "none"}
-    assert params_for("openai", "off") == {}
+        # "off" -> explicit "none" (a valid, required disable for gpt-5 + tools).
+        assert params_for(provider, "off") == {"reasoning_effort": "none"}
 
 
 def test_params_for_ollama_native_uses_think():
