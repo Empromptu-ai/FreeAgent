@@ -534,6 +534,25 @@ case "${1:-}" in
     # Side-effect-free dump: read .env if present, else fall back to .env.example.
     if [ -f "$ENV_FILE" ]; then SRC="$ENV_FILE"; else SRC="$EXAMPLE_FILE"; fi
     parse_config; render_env; exit 0 ;;
+  # ---- non-interactive query flags -----------------------------------------
+  # These print machine-readable data and exit without prompting, so a GUI
+  # front-end (installer/fa-setup-gui.sh) can reuse this file as the single
+  # source of truth for RAM detection and the model catalog. No .env is touched.
+  --detect-ram)
+    # Whole-GB physical RAM, or nothing (+ exit 1) if it can't be determined.
+    if gb="$(detect_ram_gb)"; then printf '%s\n' "$gb"; exit 0; fi
+    exit 1 ;;
+  --list-models)
+    # One "tag<TAB>suggested_GB" line per catalog entry, smallest -> largest.
+    for _i in "${!MODEL_NAMES[@]}"; do
+      printf '%s\t%s\n' "${MODEL_NAMES[$_i]}" "${MODEL_MINGB[$_i]}"
+    done
+    exit 0 ;;
+  --suggest-model)
+    # The recommended tag for this machine's RAM (mid-tier fallback if unknown).
+    if gb="$(detect_ram_gb)"; then :; else gb=32; fi
+    printf '%s\n' "$(suggest_model_for_ram "$gb")"
+    exit 0 ;;
   '') ;;
   *) die "unknown argument: $1 (try --help)" ;;
 esac
