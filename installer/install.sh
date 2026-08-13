@@ -30,7 +30,7 @@ set -euo pipefail
 OS="$(uname -s)"
 FA_REPO_URL="${FA_REPO_URL:-https://github.com/Empromptu-ai/FreeAgent}"
 # FA_BRANCH="${FA_BRANCH:-main}"
-FA_BRANCH="${FA_BRANCH:-main}"
+FA_BRANCH="${FA_BRANCH:-with_standalone_installer}"
 FA_LAUNCH_AFTER="${FA_LAUNCH_AFTER:-1}"
 FA_FORCE_SETUP="${FA_FORCE_SETUP:-0}"
 
