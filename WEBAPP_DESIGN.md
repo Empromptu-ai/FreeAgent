@@ -190,6 +190,11 @@ exact page the Install button (§2.1) attaches to.
 
 ## 5A. The minimal online installer (recommended first build)
 
+> **Built and working — see [`installer/`](installer/):** `freeagent-install.sh`
+> (the template/installer) and `generate-installer.sh` (the wizard's server-side
+> step), with [`installer/README.md`](installer/README.md). The rest of this
+> section is the rationale behind those files.
+
 This is the concrete artifact the web app hands the user, and it is intentionally
 the **simplest possible** thing: **macOS + Linux only, no changes to any existing
 code, no companion daemon, no certs.** It leans entirely on the fact that
